@@ -22,6 +22,7 @@
 // @updateURL    https://raw.githubusercontent.com/x-ww/Scripts/main/MovieRatingIntegrator/MovieRatingIntegrator.js
 // @downloadURL  https://raw.githubusercontent.com/x-ww/Scripts/main/MovieRatingIntegrator/MovieRatingIntegrator.js
 // @noframes
+// @run-at       document-end
 // ==/UserScript==
 'use strict';
 
@@ -98,3 +99,363 @@
             console.error(`JSONP parse ${url}:`, error);
             return undefined;
         }
+    }
+
+    function waitForElement(selector, timeout = 8000) {
+        return new Promise(resolve => {
+            const existing = qs(selector);
+            if (existing) {
+                resolve(existing);
+                return;
+            }
+
+            const observer = new MutationObserver(() => {
+                const node = qs(selector);
+                if (node) {
+                    observer.disconnect();
+                    resolve(node);
+                }
+            });
+
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+
+            setTimeout(() => {
+                observer.disconnect();
+                resolve(qs(selector));
+            }, timeout);
+        });
+    }
+
+    function compactNumber(value) {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return value ?? '';
+        return new Intl.NumberFormat('en-US', { notation: 'compact' }).format(numeric);
+    }
+
+    function formatVoterCount(value) {
+        return String(value ?? '').replace(/,/g, '');
+    }
+
+    function injectTop250Style() {
+        if (document.getElementById(IMDB_TOP_STYLE_ID)) return;
+
+        const style = document.createElement('style');
+        style.id = IMDB_TOP_STYLE_ID;
+        style.textContent = '.top250{background:url(https://img1.doubanio.com/f/movie/f8a7b5e23d00edee6b42c6424989ce6683aa2fff/pics/movie/top250_bg.png) no-repeat;width:150px;font:12px Helvetica,Arial,sans-serif;margin:5px 0;color:#744900;display:inline-block}.top250 span{display:inline-block;text-align:center;height:18px;line-height:18px}.top250 a{color:#744900;text-decoration:none;background:none}.top250-no{width:34%}.top250-link{width:66%}';
+        document.head.appendChild(style);
+    }
+
+    function buildMetacriticSlug(title) {
+        return title
+            .toLowerCase()
+            .replace(/[:'".,?!&]/g, '')
+            .replace(/[\s_]+/g, '-')
+            .replace(/-+/g, '-')
+            .replace(/[^a-z0-9-]/g, '')
+            .replace(/^-+|-+$/g, '')
+            .replace(/-(ii|iii|iv|v|vi|vii|viii|ix|x)$/, (_, roman) => (
+                '-' + { ii: '2', iii: '3', iv: '4', v: '5', vi: '6', vii: '7', viii: '8', ix: '9', x: '10' }[roman]
+            ));
+    }
+
+    function buildTomatoIcon(base64) {
+        return `background:url(data:image/png;base64,${base64}) no-repeat;background-size:cover;width:18px;height:18px;margin:0 2px;vertical-align:middle;display:inline-block`;
+    }
+
+    async function getIMDbInfo(id) {
+        const key = OMDB_KEYS[Math.floor(Math.random() * OMDB_KEYS.length)];
+        const [omdb, imdb] = await Promise.all([
+            gmJson(`https://www.omdbapi.com/?tomatoes=true&apikey=${key}&i=${id}`),
+            gmJsonp(`https://p.media-imdb.com/static-content/documents/v1/title/${id}/ratings%3Fjsonp=imdb.rating.run:imdb.api.title.ratings/data.json`)
+        ]);
+        const data = omdb || {};
+        const resource = imdb?.resource;
+
+        if (resource) {
+            if (resource.rating) data.imdbRating = resource.rating;
+            if (resource.ratingCount) data.imdbVotes = resource.ratingCount;
+            if (resource.ratingsHistograms?.['IMDb Users']) data.histogram = resource.ratingsHistograms['IMDb Users'].histogram;
+            if (resource.topRank) data.topRank = resource.topRank;
+        }
+
+        return data;
+    }
+
+    async function getDoubanInfo(id) {
+        const direct = await gmJson(`https://api.douban.com/v2/movie/imdb/${id}`, DB_HEADERS, DB_KEY);
+        if (direct && !isNA(direct.alt)) {
+            return {
+                url: `${direct.alt.replace('/movie/', '/subject/').replace(/\/?$/, '/')}`,
+                rating: direct.rating,
+                title: direct.title
+            };
+        }
+
+        const suggestions = await gmJson(`https://movie.douban.com/j/subject_suggest?q=${id}`);
+        const suggestion = suggestions?.[0];
+        if (!suggestion?.id) return undefined;
+
+        const abstract = await gmJson(`https://movie.douban.com/j/subject_abstract?subject_id=${suggestion.id}`);
+        return {
+            url: `https://movie.douban.com/subject/${suggestion.id}/`,
+            rating: {
+                numRaters: '',
+                max: 10,
+                average: abstract?.subject?.rate || '?'
+            },
+            title: suggestion.title
+        };
+    }
+
+    function insertDoubanRating(parent, title, rating, link, numRaters, histogram) {
+        const numericRating = Number(rating);
+        const star = (5 * Math.round(numericRating)).toString().padStart(2, '0');
+        const displayRating = Number.isFinite(numericRating) ? numericRating.toFixed(1) : rating;
+        let histogramHtml = '';
+
+        if (histogram && numRaters) {
+            const histogramValues = Object.values(histogram);
+            const max = Math.max(...histogramValues, 0);
+
+            histogramHtml = '<div class="ratings-on-weight">' + Array.from({ length: 10 }, (_, index) => 10 - index).map(score => {
+                const count = Number(histogram[score] || 0);
+                const percent = numRaters ? (count * 100 / numRaters).toFixed(1) : '0.0';
+                const width = max ? 64 / max * count : 0;
+                return `<div class="item"><span class="stars${score} starstop" style="width:18px;text-align:center">${score}</span><div class="power" style="width:${width}px"></div><span class="rating_per">${percent}%</span><br></div>`;
+            }).join('') + '</div>';
+        }
+
+        parent.insertAdjacentHTML('beforeend', `
+            <div class="rating_logo">${title}</div>
+            <div class="rating_self clearfix">
+                <strong class="ll rating_num">${displayRating}</strong>
+                <div class="rating_right">
+                    <div class="ll bigstar${star}"></div>
+                    <div style="clear:both" class="rating_sum">
+                        <a href="${link}" target="_blank" rel="noopener noreferrer">${formatVoterCount(numRaters)}人评价</a>
+                    </div>
+                </div>
+            </div>${histogramHtml}`);
+    }
+
+    function insertDoubanInfo(name, value) {
+        const info = qs('#info');
+        if (!info) return;
+
+        if (info.lastElementChild?.nodeName !== 'BR') {
+            info.insertAdjacentHTML('beforeend', '<br>');
+        }
+
+        info.insertAdjacentHTML('beforeend', `<span class="pl">${name}:</span> ${value}<br>`);
+    }
+
+    function linkify(node, base) {
+        const id = node?.textContent?.trim();
+        if (!id) return null;
+
+        const anchor = Object.assign(document.createElement('a'), {
+            href: base + id,
+            target: '_blank',
+            rel: 'noopener noreferrer',
+            textContent: id
+        });
+        node.replaceWith(anchor);
+        anchor.insertAdjacentText('beforebegin', ' ');
+        return id;
+    }
+
+    function renderMetascore(container, data) {
+        if (isNA(data.Metascore)) return;
+
+        const metascore = parseInt(data.Metascore, 10);
+        const color = metascore >= 60 ? '#6c3' : metascore >= 40 ? '#fc3' : '#f00';
+        const pageTitle = (qs('h1')?.textContent?.trim() || document.title)
+            .replace(/ - 豆瓣.*$/, '')
+            .replace(/（.*/, '')
+            .trim();
+        const metaUrl = data.Title
+            ? `https://www.metacritic.com/movie/${buildMetacriticSlug(data.Title)}/`
+            : `https://www.metacritic.com/search/all/${encodeURIComponent(pageTitle)}/results`;
+
+        container.insertAdjacentHTML('beforeend',
+            `<br>Metascore: <a href="${metaUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><span style="background-color:${color};color:#fff;height:24px;width:24px;line-height:24px;vertical-align:middle;display:inline-block;text-align:center;font-weight:bold">${data.Metascore}</span></a>`);
+    }
+
+    function renderRottenTomatoes(container, data) {
+        const rt = data.Ratings?.find(item => item.Source === 'Rotten Tomatoes');
+        if (!rt?.Value) return;
+
+        const fresh = parseInt(rt.Value, 10) >= 60;
+        const tomatoUrl = (data.tomatoURL || '').replace('http://', 'https://');
+
+        container.insertAdjacentHTML('beforeend',
+            `<br><a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(fresh ? TOMATO_ICON_FRESH : TOMATO_ICON_ROTTEN)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${rt.Value}</span>`);
+
+        if (isNA(data.tomatoUserMeter)) return;
+
+        const userPositive = parseFloat(data.tomatoUserRating) >= 3.5;
+        container.insertAdjacentHTML('beforeend',
+            `<a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(userPositive ? TOMATO_USER_ICON_POSITIVE : TOMATO_USER_ICON_NEGATIVE)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${data.tomatoUserMeter}%</span>`);
+    }
+
+    function ensureRecoveredDoubanRating(dbId) {
+        const subjectWrap = qs('.subjectwrap');
+        const subject = qs('.subject');
+        if (!subjectWrap || !subject) return null;
+
+        const section = document.createElement('div');
+        section.id = 'interest_sectl';
+        subjectWrap.insertBefore(section, subject.nextSibling);
+
+        const wrap = document.createElement('div');
+        wrap.className = 'rating_wrap';
+        section.appendChild(wrap);
+
+        getDoubanInfo(dbId).then(data => {
+            if (data?.rating && !isNA(data.rating.average)) {
+                insertDoubanRating(
+                    wrap,
+                    '豆瓣评分',
+                    data.rating.average,
+                    `https://movie.douban.com/subject/${dbId}/collections`,
+                    data.rating.numRaters
+                );
+            }
+            wrap.title = DOUBAN_RECOVERED_TITLE;
+        });
+
+        if (qs('#movie-rating-iframe')) {
+            section.style.marginTop = '96px';
+        }
+
+        return section;
+    }
+
+    async function handleDoubanMoviePage() {
+        await waitForElement('#info');
+
+        const dbId = location.href.match(/douban\.com\/subject\/(\d+)/)?.[1];
+        let section = document.getElementById('interest_sectl');
+
+        if (!section) {
+            if (!dbId) return;
+            section = ensureRecoveredDoubanRating(dbId);
+            if (!section) return;
+        }
+
+        if (document.getElementById('movie-rating-integrator-extra')) return;
+
+        const imdbLabel = qsa('#info > span.pl').find(node => node.innerText.trim() === 'IMDb:');
+        const imdbNode = imdbLabel?.nextSibling;
+        if (!imdbNode) return;
+
+        const imdbId = linkify(imdbNode, 'https://www.imdb.com/title/');
+        if (!imdbId) return;
+
+        const data = await getIMDbInfo(imdbId);
+        if (!data || (isNA(data.imdbRating) && isNA(data.Metascore))) return;
+
+        const ratings = document.createElement('div');
+        ratings.id = 'movie-rating-integrator-extra';
+        ratings.className = 'rating_wrap clearbox';
+        ratings.style.cssText = 'padding:15px 0;border-top:1px solid #eaeaea;';
+
+        const ratingWrap = qs('.friends_rating_wrap') || qs('.rating_wrap');
+        section.insertBefore(ratings, ratingWrap?.nextSibling || null);
+        section.style.marginBottom = qs('.colbutt') ? '-136px' : '-154px';
+
+        const recommendation = qs('.rec-sec, #interest_sect_level');
+        if (recommendation) {
+            recommendation.style.width = '488px';
+        }
+
+        if (!isNA(data.imdbRating)) {
+            insertDoubanRating(
+                ratings,
+                'IMDb评分',
+                data.imdbRating,
+                `https://www.imdb.com/title/${imdbId}/ratings`,
+                data.imdbVotes,
+                data.histogram
+            );
+
+            if (!isNA(data.topRank) && data.topRank <= 250 && !qs('.top250')) {
+                injectTop250Style();
+                (document.getElementById('dale_movie_subject_top_icon') || qs('h1'))?.insertAdjacentHTML(
+                    'beforebegin',
+                    `<div class="top250"><span class="top250-no">No.${data.topRank}</span><span class="top250-link"><a href="https://www.imdb.com/chart/top">IMDb Top 250</a></span></div>`
+                );
+            }
+        }
+
+        renderMetascore(ratings, data);
+        renderRottenTomatoes(ratings, data);
+
+        if (!isNA(data.Rated)) insertDoubanInfo('MPAA评级', data.Rated);
+        if (!isNA(data.BoxOffice)) insertDoubanInfo('票房', data.BoxOffice);
+    }
+
+    function handleDoubanPersonPage() {
+        const node = qsa('span.value').find(item => /^nm\d+/.test(item.innerText.trim()));
+        if (node) {
+            linkify(node, 'https://www.imdb.com/name/');
+        }
+    }
+
+    async function handleImdbPage() {
+        await waitForElement('.rating-bar__base-button');
+
+        const id = location.href.match(/tt\d+/)?.[0];
+        if (!id || document.getElementById('movie-rating-integrator-douban')) return;
+
+        const data = await getDoubanInfo(id);
+        if (!data) return;
+
+        const imdbButton = qs('.rating-bar__base-button');
+        if (!imdbButton?.parentElement) return;
+
+        const button = imdbButton.cloneNode(true);
+        button.id = 'movie-rating-integrator-douban';
+
+        const firstChild = button.firstElementChild;
+        if (firstChild) firstChild.textContent = 'Douban RATING';
+
+        button.href = data.url;
+        button.target = '_blank';
+        button.rel = 'noopener noreferrer';
+        button.title = data.title;
+
+        const scoreContainer = qs('div[data-testid="hero-rating-bar__aggregate-rating__score"]', button);
+        if (!scoreContainer?.firstElementChild) return;
+
+        scoreContainer.firstElementChild.textContent = data.rating.average;
+        const numElement = scoreContainer.nextElementSibling?.nextElementSibling;
+        if (numElement) {
+            numElement.textContent = compactNumber(data.rating.numRaters);
+        }
+
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            window.open(data.url, '_blank', 'noopener');
+        });
+
+        imdbButton.parentElement.insertAdjacentElement('afterbegin', button);
+    }
+
+    function init() {
+        if (host === 'movie.douban.com') {
+            handleDoubanMoviePage();
+        } else if (host === 'www.douban.com') {
+            handleDoubanPersonPage();
+        } else if (host === 'www.imdb.com') {
+            handleImdbPage();
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init, { once: true });
+    } else {
+        init();
+    }
+})();
