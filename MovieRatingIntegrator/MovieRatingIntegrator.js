@@ -46,6 +46,26 @@
     const qs = (selector, root = document) => root.querySelector(selector);
     const qsa = (selector, root = document) => [...root.querySelectorAll(selector)];
 
+    function escapeHtml(value) {
+        return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function safeUrl(url) {
+        if (!url) return '';
+
+        try {
+            const parsed = new URL(url, location.href);
+            return /^https?:$/.test(parsed.protocol) ? parsed.href : '';
+        } catch {
+            return '';
+        }
+    }
+
     function gmRequest(url, headers, data) {
         return new Promise(resolve => {
             if (!GM_REQUEST) {
@@ -207,10 +227,27 @@
         };
     }
 
+    async function getDoubanSubjectRating(dbId) {
+        const abstract = await gmJson(`https://movie.douban.com/j/subject_abstract?subject_id=${dbId}`);
+        const subject = abstract?.subject;
+        if (!subject) return undefined;
+
+        return {
+            url: `https://movie.douban.com/subject/${dbId}/`,
+            rating: {
+                numRaters: '',
+                max: 10,
+                average: subject.rate || '?'
+            },
+            title: subject.title || document.title
+        };
+    }
+
     function insertDoubanRating(parent, title, rating, link, numRaters, histogram) {
         const numericRating = Number(rating);
         const star = (5 * Math.round(numericRating)).toString().padStart(2, '0');
         const displayRating = Number.isFinite(numericRating) ? numericRating.toFixed(1) : rating;
+        const safeLink = safeUrl(link);
         let histogramHtml = '';
 
         if (histogram && numRaters) {
@@ -226,13 +263,13 @@
         }
 
         parent.insertAdjacentHTML('beforeend', `
-            <div class="rating_logo">${title}</div>
+            <div class="rating_logo">${escapeHtml(title)}</div>
             <div class="rating_self clearfix">
-                <strong class="ll rating_num">${displayRating}</strong>
+                <strong class="ll rating_num">${escapeHtml(displayRating)}</strong>
                 <div class="rating_right">
                     <div class="ll bigstar${star}"></div>
                     <div style="clear:both" class="rating_sum">
-                        <a href="${link}" target="_blank" rel="noopener noreferrer">${formatVoterCount(numRaters)}人评价</a>
+                        <a href="${safeLink}" target="_blank" rel="noopener noreferrer">${escapeHtml(formatVoterCount(numRaters))}人评价</a>
                     </div>
                 </div>
             </div>${histogramHtml}`);
@@ -246,7 +283,7 @@
             info.insertAdjacentHTML('beforeend', '<br>');
         }
 
-        info.insertAdjacentHTML('beforeend', `<span class="pl">${name}:</span> ${value}<br>`);
+        info.insertAdjacentHTML('beforeend', `<span class="pl">${escapeHtml(name)}:</span> ${escapeHtml(value)}<br>`);
     }
 
     function linkify(node, base) {
@@ -276,9 +313,10 @@
         const metaUrl = data.Title
             ? `https://www.metacritic.com/movie/${buildMetacriticSlug(data.Title)}/`
             : `https://www.metacritic.com/search/all/${encodeURIComponent(pageTitle)}/results`;
+        const safeMetaUrl = safeUrl(metaUrl);
 
         container.insertAdjacentHTML('beforeend',
-            `<br>Metascore: <a href="${metaUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><span style="background-color:${color};color:#fff;height:24px;width:24px;line-height:24px;vertical-align:middle;display:inline-block;text-align:center;font-weight:bold">${data.Metascore}</span></a>`);
+            `<br>Metascore: <a href="${safeMetaUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><span style="background-color:${color};color:#fff;height:24px;width:24px;line-height:24px;vertical-align:middle;display:inline-block;text-align:center;font-weight:bold">${escapeHtml(data.Metascore)}</span></a>`);
     }
 
     function renderRottenTomatoes(container, data) {
@@ -286,16 +324,16 @@
         if (!rt?.Value) return;
 
         const fresh = parseInt(rt.Value, 10) >= 60;
-        const tomatoUrl = (data.tomatoURL || '').replace('http://', 'https://');
+        const tomatoUrl = safeUrl((data.tomatoURL || '').replace('http://', 'https://'));
 
         container.insertAdjacentHTML('beforeend',
-            `<br><a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(fresh ? TOMATO_ICON_FRESH : TOMATO_ICON_ROTTEN)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${rt.Value}</span>`);
+            `<br><a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(fresh ? TOMATO_ICON_FRESH : TOMATO_ICON_ROTTEN)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${escapeHtml(rt.Value)}</span>`);
 
         if (isNA(data.tomatoUserMeter)) return;
 
         const userPositive = parseFloat(data.tomatoUserRating) >= 3.5;
         container.insertAdjacentHTML('beforeend',
-            `<a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(userPositive ? TOMATO_USER_ICON_POSITIVE : TOMATO_USER_ICON_NEGATIVE)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${data.tomatoUserMeter}%</span>`);
+            `<a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(userPositive ? TOMATO_USER_ICON_POSITIVE : TOMATO_USER_ICON_NEGATIVE)}"></span></a><span style="vertical-align:middle;display:inline-block;line-height:18px">${escapeHtml(data.tomatoUserMeter)}%</span>`);
     }
 
     function ensureRecoveredDoubanRating(dbId) {
@@ -311,7 +349,7 @@
         wrap.className = 'rating_wrap';
         section.appendChild(wrap);
 
-        getDoubanInfo(dbId).then(data => {
+        getDoubanSubjectRating(dbId).then(data => {
             if (data?.rating && !isNA(data.rating.average)) {
                 insertDoubanRating(
                     wrap,
@@ -353,7 +391,9 @@
         if (!imdbId) return;
 
         const data = await getIMDbInfo(imdbId);
-        if (!data || (isNA(data.imdbRating) && isNA(data.Metascore))) return;
+        const hasRottenTomatoes = Boolean(data?.Ratings?.find(item => item.Source === 'Rotten Tomatoes')?.Value);
+        const hasExtraInfo = !isNA(data?.Rated) || !isNA(data?.BoxOffice);
+        if (!data || (isNA(data.imdbRating) && isNA(data.Metascore) && !hasRottenTomatoes && !hasExtraInfo)) return;
 
         const ratings = document.createElement('div');
         ratings.id = 'movie-rating-integrator-extra';
