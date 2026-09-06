@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.4.0
+// @version      1.5.0
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -340,36 +340,37 @@
   }
 
   async function getDoubanInfo(id) {
-    const direct = await gmJson(
-      `https://api.douban.com/v2/movie/imdb/${id}`,
-      DB_HEADERS,
-      DB_KEY,
-    );
-    if (direct && !isNA(direct.alt)) {
-      return {
-        url: `${direct.alt.replace("/movie/", "/subject/").replace(/\/?$/, "/")}`,
-        rating: direct.rating,
-        title: direct.title,
-      };
-    }
+    // 豆瓣 v2 开放 API 已下线（code 104 invalid_apikey），且 subject_suggest 按 IMDb
+    // tt 编号搜索已失效（返回空数组）——改按 IMDb 页的英文片名+年份搜索。
+    const title = (qs("h1, [data-testid='hero__pageTitle']")?.textContent || "")
+      .trim()
+      .replace(/\s+/g, " ");
+    const year = document.title.match(/\((\d{4})\)/)?.[1];
+    if (!title) return undefined;
 
     const suggestions = await gmJson(
-      `https://movie.douban.com/j/subject_suggest?q=${id}`,
+      `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(title)}`,
     );
-    const suggestion = suggestions?.[0];
-    if (!suggestion?.id) return undefined;
+    if (!Array.isArray(suggestions) || !suggestions.length) return undefined;
+
+    // 优先精确匹配电影 + 年份，其次任一电影结果，再退到第一个建议
+    const hit =
+      suggestions.find((s) => s.type === "movie" && (!year || s.year === year)) ||
+      suggestions.find((s) => s.type === "movie") ||
+      suggestions[0];
+    if (!hit?.id) return undefined;
 
     const abstract = await gmJson(
-      `https://movie.douban.com/j/subject_abstract?subject_id=${suggestion.id}`,
+      `https://movie.douban.com/j/subject_abstract?subject_id=${hit.id}`,
     );
     return {
-      url: `https://movie.douban.com/subject/${suggestion.id}/`,
+      url: `https://movie.douban.com/subject/${hit.id}/`,
       rating: {
         numRaters: "",
         max: 10,
-        average: abstract?.subject?.rate || "?",
+        average: abstract?.subject?.rate || "",
       },
-      title: suggestion.title,
+      title: hit.sub_title || hit.title,
     };
   }
 
@@ -647,8 +648,6 @@
   }
 
   async function handleImdbPage() {
-    await waitForElement(".rating-bar__base-button");
-
     const id = location.href.match(/tt\d+/)?.[0];
     if (!id || document.getElementById("movie-rating-integrator-douban"))
       return;
@@ -657,39 +656,35 @@
     // 防御：rating 或 average 缺失时提前退出，避免运行时报错
     if (!data?.rating?.average) return;
 
-    const imdbButton = qs(".rating-bar__base-button");
-    if (!imdbButton?.parentElement) return;
-
-    const button = imdbButton.cloneNode(true);
-    button.id = "movie-rating-integrator-douban";
-
-    const firstChild = button.firstElementChild;
-    if (firstChild) firstChild.textContent = "Douban RATING";
-
-    button.href = data.url;
-    button.target = "_blank";
-    button.rel = "noopener noreferrer";
-    button.title = data.title;
-
-    const scoreContainer = qs(
-      'div[data-testid="hero-rating-bar__aggregate-rating__score"]',
-      button,
+    // IMDb 多次改版后 `.rating-bar__base-button` 已不存在；用现行的聚合评分栏
+    // testid 定位，并循环监听等待渲染完成（SPA 异步填充）。找不到即放弃。
+    const bar = await waitForElement(
+      '[data-testid="hero-rating-bar__aggregate-rating"]',
+      10000,
     );
-    if (!scoreContainer?.firstElementChild) return;
+    if (!bar) return;
 
-    scoreContainer.firstElementChild.textContent = data.rating.average;
-    const numElement = scoreContainer.nextElementSibling?.nextElementSibling;
-    if (numElement) {
-      numElement.textContent = compactNumber(data.rating.numRaters);
-    }
+    if (document.getElementById("movie-rating-integrator-douban")) return;
 
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      window.open(data.url, "_blank", "noopener");
-    });
-
-    imdbButton.parentElement.insertAdjacentElement("afterbegin", button);
+    const rating = Number(data.rating.average).toFixed(1);
+    const card = document.createElement("a");
+    card.id = "movie-rating-integrator-douban";
+    card.href = data.url;
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    card.title = `豆瓣：${data.title}（${rating}）`;
+    card.style.cssText =
+      "display:inline-flex;align-items:center;gap:8px;margin-left:16px;" +
+      "padding:8px 14px;border:1px solid #e5e5e5;border-radius:8px;" +
+      "background:#f7f7f7;color:#111;text-decoration:none;font-size:14px;";
+    card.innerHTML =
+      `<span style="font-weight:700;color:#ffac2d">豆瓣 ${escapeHtml(rating)}</span>` +
+      (data.rating.numRaters
+        ? `<span style="color:#666;font-size:12px">${escapeHtml(
+            compactNumber(data.rating.numRaters),
+          )} 人</span>`
+        : "");
+    bar.appendChild(card);
   }
 
   // 页面卸载时清理所有活跃的 observers，防止内存泄漏
