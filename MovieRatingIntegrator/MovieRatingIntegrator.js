@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.4
+// @version      1.5.5
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -700,13 +700,14 @@
     const badge = document.createElement("div");
     badge.id = "movie-rating-integrator-douban";
     badge.style.cssText =
-      "display:flex;flex-direction:column;align-items:flex-start;justify-content:center;margin-left:24px;cursor:pointer;line-height:1.3;font-family:inherit";
+      "display:flex;flex-direction:column;align-items:center;justify-content:center;margin-left:32px;padding-left:32px;border-left:1px solid rgba(255,255,255,0.15);cursor:pointer;line-height:1.3;font-family:inherit;text-align:center";
     badge.title = `豆瓣：${data.title}（${ratingStr}）`;
     badge.innerHTML =
-      '<span style="font-size:11px;letter-spacing:0.05em;color:#a2a2a2;text-transform:uppercase;white-space:nowrap">豆瓣评分</span>' +
-      '<span style="display:flex;align-items:baseline;gap:3px">' +
-      `<span style="font-size:22px;font-weight:700;color:#f5c518">${escapeHtml(ratingStr)}</span>` +
-      '<span style="font-size:13px;color:#a2a2a2">/10</span>' +
+      '<span style="font-size:13px;font-weight:600;letter-spacing:0.08em;color:#a2a2a2;white-space:nowrap">豆瓣评分</span>' +
+      '<span style="display:flex;align-items:center;gap:6px;margin-top:6px">' +
+      '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#2ea44f;color:#fff;font-size:11px;font-weight:700;line-height:1;flex-shrink:0">豆</span>' +
+      `<span style="font-size:26px;font-weight:700;color:#f5c518">${escapeHtml(ratingStr)}</span>` +
+      '<span style="font-size:14px;color:#a2a2a2">/10</span>' +
       "</span>";
     badge.addEventListener("click", (event) => {
       event.preventDefault();
