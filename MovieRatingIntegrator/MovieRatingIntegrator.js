@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.3
+// @version      1.5.4
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -692,6 +692,30 @@
     }
   }
 
+  // 不再克隆 IMDb 原生评分节点：IMDb 用 CSS-in-JS（styled-components），
+  // 很多样式依赖"原来所在的父容器上下文"（百分比高度、flex 隐式约束等），
+  // 节点被搬到新位置后这些样式会失效、导致布局塌陷（表现为只剩一行标签、没有分数）。
+  // 因此改为插入一个自带内联样式、视觉上风格相近但完全独立于 IMDb 内部 class 的徽标。
+  function buildDoubanBadge(data, ratingStr) {
+    const badge = document.createElement("div");
+    badge.id = "movie-rating-integrator-douban";
+    badge.style.cssText =
+      "display:flex;flex-direction:column;align-items:flex-start;justify-content:center;margin-left:24px;cursor:pointer;line-height:1.3;font-family:inherit";
+    badge.title = `豆瓣：${data.title}（${ratingStr}）`;
+    badge.innerHTML =
+      '<span style="font-size:11px;letter-spacing:0.05em;color:#a2a2a2;text-transform:uppercase;white-space:nowrap">豆瓣评分</span>' +
+      '<span style="display:flex;align-items:baseline;gap:3px">' +
+      `<span style="font-size:22px;font-weight:700;color:#f5c518">${escapeHtml(ratingStr)}</span>` +
+      '<span style="font-size:13px;color:#a2a2a2">/10</span>' +
+      "</span>";
+    badge.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.open(data.url, "_blank", "noopener");
+    });
+    return badge;
+  }
+
   async function handleImdbPage() {
     const id = location.href.match(/tt\d+/)?.[0];
     if (!id) return;
@@ -707,6 +731,21 @@
       ".rating-bar__base-button",
       '[class*="AggregateRating"]',
     ];
+
+    // 文本兜底：找不到 testid 时，用 "8.3/10" 这类文本定位分数节点所在的容器
+    const findAnchor = () => {
+      const hit = selectors.map((s) => qs(s)).find(Boolean);
+      if (hit) return hit;
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (/^\s*\d\.\d\s*\/\s*10\s*$/.test(node.textContent)) {
+          return node.parentElement?.closest("div,span");
+        }
+      }
+      return null;
+    };
+
     const bar = await waitForAny(selectors, 12000);
 
     // 3) 取豆瓣数据
@@ -717,18 +756,7 @@
     }
     if (document.getElementById("movie-rating-integrator-douban")) return;
 
-    // 4) 文本兜底：找不到 testid 时，用 "8.3/10" 这类文本定位分数节点
-    let anchor = bar;
-    if (!anchor) {
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        if (/^\s*\d\.\d\s*\/\s*10\s*$/.test(node.textContent)) {
-          anchor = node.parentElement?.closest("div,span");
-          break;
-        }
-      }
-    }
+    const anchor = bar || findAnchor();
     if (!anchor) {
       console.warn(
         "[影评聚合] 未找到 IMDb 评分块。当前页面 rating 相关 testid：",
@@ -744,57 +772,14 @@
       ? rating.toFixed(1)
       : data.rating.average;
 
-    // 5) 克隆原生评分块，风格 100% 继承 IMDb
-    const clone = anchor.cloneNode(true);
-    clone.id = "movie-rating-integrator-douban";
-    clone.removeAttribute("aria-label");
-    clone.style.cursor = "pointer";
-    clone.title = `豆瓣：${data.title}（${ratingStr}）`;
-
-    // 分数节点：先按 testid（宽松匹配），再按 "x.x/10" 文本兜底
-    let score = qs('[data-testid*="aggregate-rating__score"]', clone);
-    if (!score) {
-      const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
-      let node;
-      while ((node = walker.nextNode())) {
-        if (/^\s*\d\.\d(\s*\/\s*10)?\s*$/.test(node.textContent)) {
-          score = node.parentElement;
-          break;
-        }
-      }
-    }
-    if (!score) {
-      console.warn("[影评聚合] 克隆块内未找到分数节点，放弃克隆");
-      return;
-    }
-    score.textContent = `豆瓣 ${ratingStr}/10`;
-
-    // 进度条按豆瓣比例填充
-    const fill = qs(
-      '[data-testid*="bar-partial"], [class*="filled"], [class*="bar__partial"]',
-      clone,
-    );
-    if (fill && Number.isFinite(rating)) {
-      fill.style.width = `${Math.min(rating * 10, 100)}%`;
-    }
-
-    // 移除克隆体里指向 IMDb 评分页的链接，避免误导
-    qsa("a[href*='ratings']", clone).forEach((n) => n.remove());
-
-    clone.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      window.open(data.url, "_blank", "noopener");
-    });
-
-    (anchor.parentElement || anchor).appendChild(clone);
+    const badge = buildDoubanBadge(data, ratingStr);
+    (anchor.parentElement || anchor).appendChild(badge);
     console.log("[影评聚合] 已插入豆瓣评分:", ratingStr, data.url);
 
     // 如果 IMDb 的 React 在后续渲染中移除了我们插入的节点，自动重试插入（最多重试若干次）
     try {
       let retries = 0;
       const maxRetries = 6; // 尝试 6 次
-      const retryDelay = 500; // ms
       const observer = new MutationObserver(() => {
         if (document.getElementById("movie-rating-integrator-douban")) return;
         if (retries++ >= maxRetries) {
@@ -805,57 +790,11 @@
           } catch {}
           return;
         }
-        // 异步重新运行插入逻辑（不 await）
-        (async () => {
-          try {
-            // 找到新的 anchor（优先现有 selectors）
-            const newAnchor =
-              document.querySelector(selectors.find((s) => document.querySelector(s))) ||
-              (function () {
-                const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-                let node;
-                while ((node = walker.nextNode())) {
-                  if (/^\s*\d\.\d\s*\/\s*10\s*$/.test(node.textContent)) {
-                    return node.parentElement?.closest("div,span");
-                  }
-                }
-                return null;
-              })();
-            if (!newAnchor) return;
-
-            // 重新创建 clone 并插入
-            const newClone = newAnchor.cloneNode(true);
-            newClone.id = "movie-rating-integrator-douban";
-            newClone.removeAttribute("aria-label");
-            newClone.style.cursor = "pointer";
-            newClone.title = `豆瓣：${data.title}（${ratingStr}）`;
-            // 更新文本节点
-            const sc = qs('[data-testid*="aggregate-rating__score"]', newClone);
-            if (sc) {
-              sc.textContent = `豆瓣 ${ratingStr}/10`;
-            } else {
-              const walker2 = document.createTreeWalker(newClone, NodeFilter.SHOW_TEXT);
-              let node2;
-              while ((node2 = walker2.nextNode())) {
-                if (/^\s*\d\.\d(\s*\/\s*10)?\s*$/.test(node2.textContent)) {
-                  node2.parentElement.textContent = `豆瓣 ${ratingStr}/10`;
-                  break;
-                }
-              }
-            }
-            qsa("a[href*='ratings']", newClone).forEach((n) => n.remove());
-            newClone.addEventListener("click", (event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              window.open(data.url, "_blank", "noopener");
-            });
-
-            (newAnchor.parentElement || newAnchor).appendChild(newClone);
-            console.log("[影评聚合] 重新插入豆瓣评分 (retry):", ratingStr, data.url);
-          } catch (e) {
-            console.warn("[影评聚合] 重新插入失败:", e);
-          }
-        })();
+        const newAnchor = findAnchor();
+        if (!newAnchor) return;
+        const newBadge = buildDoubanBadge(data, ratingStr);
+        (newAnchor.parentElement || newAnchor).appendChild(newBadge);
+        console.log("[影评聚合] 重新插入豆瓣评分 (retry):", ratingStr, data.url);
       });
       activeObservers.push(observer);
       observer.observe(document.documentElement, { childList: true, subtree: true });
