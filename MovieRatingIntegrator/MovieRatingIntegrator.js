@@ -666,25 +666,50 @@
 
     if (document.getElementById("movie-rating-integrator-douban")) return;
 
-    const rating = Number(data.rating.average).toFixed(1);
-    const card = document.createElement("a");
-    card.id = "movie-rating-integrator-douban";
-    card.href = data.url;
-    card.target = "_blank";
-    card.rel = "noopener noreferrer";
-    card.title = `豆瓣：${data.title}（${rating}）`;
-    card.style.cssText =
-      "display:inline-flex;align-items:center;gap:8px;margin-left:16px;" +
-      "padding:8px 14px;border:1px solid #e5e5e5;border-radius:8px;" +
-      "background:#f7f7f7;color:#111;text-decoration:none;font-size:14px;";
-    card.innerHTML =
-      `<span style="font-weight:700;color:#ffac2d">豆瓣 ${escapeHtml(rating)}</span>` +
-      (data.rating.numRaters
-        ? `<span style="color:#666;font-size:12px">${escapeHtml(
-            compactNumber(data.rating.numRaters),
-          )} 人</span>`
-        : "");
-    bar.appendChild(card);
+    const rating = Number(data.rating.average);
+    const ratingStr = Number.isFinite(rating)
+      ? rating.toFixed(1)
+      : data.rating.average;
+
+    // 克隆 IMDb 原生聚合评分块，星标/字体/颜色/进度条全部继承，保持与原站风格一致
+    const clone = bar.cloneNode(true);
+    if (!clone) return;
+    clone.id = "movie-rating-integrator-douban";
+    clone.removeAttribute("aria-label");
+    clone.style.cursor = "pointer";
+    clone.title = `豆瓣：${data.title}（${ratingStr}）`;
+
+    // 替换分数为豆瓣值（保留原生 "/10" 样式）
+    const score = qs(
+      '[data-testid="hero-rating-bar__aggregate-rating__score"]',
+      clone,
+    );
+    if (!score) {
+      clone.remove();
+      return;
+    }
+    score.textContent = `豆瓣 ${ratingStr}/10`;
+
+    // 进度条按豆瓣比例填充，更像原生数值
+    const fill = qs(
+      'div[data-testid="hero-rating-bar__aggregate-rating__bar-partial"], [class*="rating-bar"] [class*="filled"]',
+      clone,
+    );
+    if (fill) fill.style.width = `${Math.min(rating * 10, 100)}%`;
+
+    // 移除克隆体里多余的"多少人评价"链接，避免重复
+    qsa("a[href*='/ratings/']", clone).forEach((n) => n.remove());
+
+    // 点击跳转豆瓣页
+    clone.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      window.open(data.url, "_blank", "noopener");
+    });
+
+    // 插到原生评分块旁边（同一容器）
+    const row = bar.parentElement || bar;
+    row.appendChild(clone);
   }
 
   // 页面卸载时清理所有活跃的 observers，防止内存泄漏
