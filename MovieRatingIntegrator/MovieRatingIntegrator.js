@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.2
+// @version      1.5.3
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -52,14 +52,11 @@
   const DOUBAN_RECOVERED_TITLE = "Rating recovered by script.";
   const host = location.hostname;
 
-  const TOMATO_ICON_FRESH =
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAFBElEQVR4Aa2VA7TszBpEd6c7yfiY13q2bdu2bdu2bdu2bdtHGGei7u9l8Ju4tVaNsKtaieJsyA917djNjrzk9z/a/hzwKc6BDGdDpbo/e3i1es3NYPtrrX+1K0B0XAI8rUJtvKA6E+6J/9X[...]"
-  const TOMATO_ICON_ROTTEN =
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAFZ0lEQVR4Ac1UA5Qj7RYMhwjGtk10upOsbTtr28YoM6uxbRtr29Zv22a9O3q265w6za+uwPtr0Jfo+npGWmuDBzsUmDmYTOYL+GLevwsSCwNmbVzQq02XGbRcZZBWF/VDgMoumc/ni/51dT5PMGK[...]"
-  const TOMATO_USER_ICON_POSITIVE =
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAFK0lEQVR4AZTNQ4DsWAAF0JsXFJIygm/btm3btoXN2LZt27bRtm2nKprGdlr3mYegndA0ocMhV5gQilzdO+CmJ25c9uonL556dtwIaSLQEo/b4aUag/9Ju8CC2SMXvvP8kQ/uuW7Vfdu3bdkxdfL[...]"
-  const TOMATO_USER_ICON_NEGATIVE =
-    "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAEXklEQVR4Ae2UQ6MjWRiG33NOpVJIUhX7KpdtjW3btpfzG2Y9mxE2Y9tm27Z9jSRlTKaGbaz7LfP5jBM6kgiOQ5SCyxTFCeOnpa9L5sOtS2b2vw7gexxE3GHpFEwQOSUS4zOpjFpKZ5XmbE5tbat[...]"
+  // 原脚本这里是 base64 编码的图标，文件被截断后已损坏，改用 emoji 代替
+  const TOMATO_ICON_FRESH = "🍅";
+  const TOMATO_ICON_ROTTEN = "🟢";
+  const TOMATO_USER_ICON_POSITIVE = "🍿";
+  const TOMATO_USER_ICON_NEGATIVE = "💤";
 
   const isNA = (value) => value == null || value === "" || value === "N/A";
   const qs = (selector, root = document) => root.querySelector(selector);
@@ -313,7 +310,9 @@
     const style = document.createElement("style");
     style.id = IMDB_TOP_STYLE_ID;
     style.textContent =
-      ".top250{background:url(https://img1.doubanio.com/f/movie/f8a7b5e23d00edee6b42c6424989ce6683aa2fff/pics/movie/top250_bg.png) no-repeat;width:150px;font:12px Helvetica,Arial,sans-serif;margi[...]";
+      ".top250{display:inline-flex;align-items:center;gap:6px;font:12px/1.4 Helvetica,Arial,sans-serif;margin:8px 0;padding:5px 10px;background:#f5c518;border-radius:4px}" +
+      ".top250-no{font-weight:700;color:#000}" +
+      ".top250-link a{color:#000;text-decoration:underline}";
     document.head.appendChild(style);
   }
 
@@ -344,8 +343,8 @@
       );
   }
 
-  function buildTomatoIcon(base64) {
-    return `background:url(data:image/png;base64,${base64}) no-repeat;background-size:cover;width:18px;height:18px;margin:0 2px;vertical-align:middle;display:inline-block`;
+  function buildTomatoIcon(icon) {
+    return `<span style="font-size:14px;vertical-align:middle;margin:0 2px">${icon}</span>`;
   }
 
   // ─── OMDB Key 轮询（round-robin），避免随机命中同一个超限 key ───
@@ -467,7 +466,7 @@
               ? ((count * 100) / numRaters).toFixed(1)
               : "0.0";
             const width = max ? (64 / max) * count : 0;
-            return `<div class="item"><span class="stars${score} starstop" style="width:18px;text-align:center">${score}</span><div class="power" style="width:${width}px"></div><span class="ratin[...]
+            return `<div class="item"><span class="stars${score} starstop" style="width:18px;text-align:center;display:inline-block">${score}</span><div class="power" style="width:${width}px;height:12px;background:#f2b134;display:inline-block;vertical-align:middle"></div><span class="rating_per" style="margin-left:4px">${percent}%</span></div>`;
           })
           .join("") +
         "</div>";
@@ -545,7 +544,7 @@
 
     container.insertAdjacentHTML(
       "beforeend",
-      `<br>Metascore: <a href="${safeMetaUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><span style="background-color:${color};color:#fff;height:24px;width:24px;line[...]
+      `<br>Metascore: <a href="${safeMetaUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none"><span style="background-color:${color};color:#fff;height:24px;width:24px;line-height:24px;text-align:center;display:inline-block;font-weight:700;border-radius:2px;vertical-align:middle">${escapeHtml(String(metascore))}</span></a>`,
     );
   }
 
@@ -560,7 +559,7 @@
 
     container.insertAdjacentHTML(
       "beforeend",
-      `<br><a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(fresh ? TOMATO_ICON_FRESH : TOMATO_ICON_ROTTEN)}"></span></a><sp[...]
+      `<br><a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none">${buildTomatoIcon(fresh ? TOMATO_ICON_FRESH : TOMATO_ICON_ROTTEN)}<span>${escapeHtml(rt.Value)} 烂番茄新鲜度</span></a>`,
     );
 
     if (isNA(data.tomatoUserMeter)) return;
@@ -568,7 +567,7 @@
     const userPositive = parseFloat(data.tomatoUserRating) >= 3.5;
     container.insertAdjacentHTML(
       "beforeend",
-      `<a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="background:none"><span style="${buildTomatoIcon(userPositive ? TOMATO_USER_ICON_POSITIVE : TOMATO_USER_ICON_NEGATIVE)}"><[...]
+      `<a href="${tomatoUrl}" target="_blank" rel="noopener noreferrer" style="text-decoration:none;margin-left:8px">${buildTomatoIcon(userPositive ? TOMATO_USER_ICON_POSITIVE : TOMATO_USER_ICON_NEGATIVE)}<span>${escapeHtml(String(data.tomatoUserMeter))}% 观众爆米花</span></a>`,
     );
   }
 
