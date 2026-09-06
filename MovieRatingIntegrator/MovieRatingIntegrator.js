@@ -256,6 +256,45 @@
     });
   }
 
+  // 同时等待多个候选选择器，命中任意一个即返回（应对 IMDb 改版后的多种结构）
+  function waitForAny(selectors, timeout = 10000) {
+    return new Promise((resolve) => {
+      const find = () => {
+        for (const sel of selectors) {
+          const node = qs(sel);
+          if (node) return node;
+        }
+        return null;
+      };
+      const existing = find();
+      if (existing) {
+        resolve(existing);
+        return;
+      }
+
+      const observer = new MutationObserver(() => {
+        const node = find();
+        if (node) {
+          observer.disconnect();
+          const idx = activeObservers.indexOf(observer);
+          if (idx !== -1) activeObservers.splice(idx, 1);
+          resolve(node);
+        }
+      });
+      activeObservers.push(observer);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+      });
+      setTimeout(() => {
+        observer.disconnect();
+        const idx = activeObservers.indexOf(observer);
+        if (idx !== -1) activeObservers.splice(idx, 1);
+        resolve(find());
+      }, timeout);
+    });
+  }
+
   function compactNumber(value) {
     const numeric = Number(value);
     if (!Number.isFinite(numeric)) return value ?? "";
@@ -346,12 +385,19 @@
       .trim()
       .replace(/\s+/g, " ");
     const year = document.title.match(/\((\d{4})\)/)?.[1];
-    if (!title) return undefined;
+    if (!title) {
+      console.warn("[影评聚合] 未能从页面取到片名");
+      return undefined;
+    }
+    console.log("[影评聚合] 豆瓣搜索:", title, year || "");
 
     const suggestions = await gmJson(
       `https://movie.douban.com/j/subject_suggest?q=${encodeURIComponent(title)}`,
     );
-    if (!Array.isArray(suggestions) || !suggestions.length) return undefined;
+    if (!Array.isArray(suggestions) || !suggestions.length) {
+      console.warn("[影评聚合] subject_suggest 无结果:", title);
+      return undefined;
+    }
 
     // 优先精确匹配电影 + 年份，其次任一电影结果，再退到第一个建议
     const hit =
@@ -649,67 +695,103 @@
 
   async function handleImdbPage() {
     const id = location.href.match(/tt\d+/)?.[0];
-    if (!id || document.getElementById("movie-rating-integrator-douban"))
-      return;
+    if (!id) return;
 
-    const data = await getDoubanInfo(id);
-    // 防御：rating 或 average 缺失时提前退出，避免运行时报错
-    if (!data?.rating?.average) return;
+    // 1) 等标题渲染（IMDb 是 SPA，document-end 时可能还没填充）
+    await waitForAny(['[data-testid="hero__pageTitle"]', "h1"], 10000);
 
-    // IMDb 多次改版后 `.rating-bar__base-button` 已不存在；用现行的聚合评分栏
-    // testid 定位，并循环监听等待渲染完成（SPA 异步填充）。找不到即放弃。
-    const bar = await waitForElement(
-      '[data-testid="hero-rating-bar__aggregate-rating"]',
-      10000,
+    // 2) 等聚合评分块：多候选选择器，命中任意一个即可
+    const bar = await waitForAny(
+      [
+        '[data-testid="hero-rating-bar__aggregate-rating"]',
+        '[data-testid="aggregateRating"]',
+        '[data-testid="titleRatingAndRatingCount"]',
+        ".rating-bar__base-button",
+        '[class*="AggregateRating"]',
+      ],
+      12000,
     );
-    if (!bar) return;
 
+    // 3) 取豆瓣数据
+    const data = await getDoubanInfo(id);
+    if (!data?.rating?.average) {
+      console.warn("[影评聚合] 豆瓣数据缺失，跳过插入");
+      return;
+    }
     if (document.getElementById("movie-rating-integrator-douban")) return;
+
+    // 4) 文本兜底：找不到 testid 时，用 "8.3/10" 这类文本定位分数节点
+    let anchor = bar;
+    if (!anchor) {
+      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (/^\s*\d\.\d\s*\/\s*10\s*$/.test(node.textContent)) {
+          anchor = node.parentElement?.closest("div,span");
+          break;
+        }
+      }
+    }
+    if (!anchor) {
+      console.warn(
+        "[影评聚合] 未找到 IMDb 评分块。当前页面 rating 相关 testid：",
+        [...document.querySelectorAll("[data-testid]")]
+          .map((e) => e.getAttribute("data-testid"))
+          .filter((t) => /rating/i.test(t)),
+      );
+      return;
+    }
 
     const rating = Number(data.rating.average);
     const ratingStr = Number.isFinite(rating)
       ? rating.toFixed(1)
       : data.rating.average;
 
-    // 克隆 IMDb 原生聚合评分块，星标/字体/颜色/进度条全部继承，保持与原站风格一致
-    const clone = bar.cloneNode(true);
-    if (!clone) return;
+    // 5) 克隆原生评分块，风格 100% 继承 IMDb
+    const clone = anchor.cloneNode(true);
     clone.id = "movie-rating-integrator-douban";
     clone.removeAttribute("aria-label");
     clone.style.cursor = "pointer";
     clone.title = `豆瓣：${data.title}（${ratingStr}）`;
 
-    // 替换分数为豆瓣值（保留原生 "/10" 样式）
-    const score = qs(
-      '[data-testid="hero-rating-bar__aggregate-rating__score"]',
-      clone,
-    );
+    // 分数节点：先按 testid（宽松匹配），再按 "x.x/10" 文本兜底
+    let score = qs('[data-testid*="aggregate-rating__score"]', clone);
     if (!score) {
-      clone.remove();
+      const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (/^\s*\d\.\d(\s*\/\s*10)?\s*$/.test(node.textContent)) {
+          score = node.parentElement;
+          break;
+        }
+      }
+    }
+    if (!score) {
+      console.warn("[影评聚合] 克隆块内未找到分数节点，放弃克隆");
       return;
     }
     score.textContent = `豆瓣 ${ratingStr}/10`;
 
-    // 进度条按豆瓣比例填充，更像原生数值
+    // 进度条按豆瓣比例填充
     const fill = qs(
-      'div[data-testid="hero-rating-bar__aggregate-rating__bar-partial"], [class*="rating-bar"] [class*="filled"]',
+      '[data-testid*="bar-partial"], [class*="filled"], [class*="bar__partial"]',
       clone,
     );
-    if (fill) fill.style.width = `${Math.min(rating * 10, 100)}%`;
+    if (fill && Number.isFinite(rating)) {
+      fill.style.width = `${Math.min(rating * 10, 100)}%`;
+    }
 
-    // 移除克隆体里多余的"多少人评价"链接，避免重复
-    qsa("a[href*='/ratings/']", clone).forEach((n) => n.remove());
+    // 移除克隆体里指向 IMDb 评分页的链接，避免误导
+    qsa("a[href*='ratings']", clone).forEach((n) => n.remove());
 
-    // 点击跳转豆瓣页
     clone.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       window.open(data.url, "_blank", "noopener");
     });
 
-    // 插到原生评分块旁边（同一容器）
-    const row = bar.parentElement || bar;
-    row.appendChild(clone);
+    (anchor.parentElement || anchor).appendChild(clone);
+    console.log("[影评聚合] 已插入豆瓣评分:", ratingStr, data.url);
   }
 
   // 页面卸载时清理所有活跃的 observers，防止内存泄漏
