@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.6
+// @version      1.5.7
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -11,7 +11,6 @@
 // @match        *://movie.douban.com/subject/*
 // @match        *://www.douban.com/personage/*
 // @match        *://www.imdb.com/title/*
-// @connect      api.douban.com
 // @connect      movie.douban.com
 // @connect      www.omdbapi.com
 // @connect      p.media-imdb.com
@@ -43,11 +42,6 @@
     "d58193b6",
     "15c0aa3f",
   ];
-  const DB_HEADERS = {
-    "Content-Type": "application/x-www-form-urlencoded; charset=utf8",
-  };
-  // 以 POST body 方式发送，gmJson 内部对带 data 的请求不做缓存（认证请求不宜缓存）
-  const DB_KEY = "apikey=0ab215a8b1977939201640fa14c66bab";
   const IMDB_TOP_STYLE_ID = "movie-rating-integrator-top250-style";
   const DOUBAN_RECOVERED_TITLE = "Rating recovered by script.";
   const host = location.hostname;
@@ -67,6 +61,8 @@
   // ─── 缓存配置（使用 GM_setValue/GM_getValue，跨域统一存储）───
   const CACHE_KEY = "movie-rating-integrator-cache";
   const CACHE_TTL = 24 * 60 * 60 * 1000; // 24小时
+  // 豆瓣「暂无评分 / 搜索无结果」的响应可能很快变化（新片出分、收录），只缓存 1 小时
+  const PENDING_CACHE_TTL = 60 * 60 * 1000;
   const CACHE_MAX_SIZE = 100;
   const CACHE_EVICT_COUNT = 10; // 超出上限时批量淘汰最旧的条数
 
@@ -74,17 +70,17 @@
     try {
       const cache = JSON.parse(GM_getValue(CACHE_KEY, "{}"));
       const entry = cache[key];
-      if (entry && Date.now() - entry.timestamp < CACHE_TTL) {
+      if (entry && Date.now() - entry.timestamp < (entry.ttl ?? CACHE_TTL)) {
         return entry.data;
       }
     } catch {}
     return null;
   }
 
-  function setCache(key, data) {
+  function setCache(key, data, ttl) {
     try {
       const cache = JSON.parse(GM_getValue(CACHE_KEY, "{}"));
-      cache[key] = { data, timestamp: Date.now() };
+      cache[key] = { data, timestamp: Date.now(), ttl };
 
       const keys = Object.keys(cache);
       if (keys.length > CACHE_MAX_SIZE) {
@@ -97,6 +93,12 @@
 
       GM_setValue(CACHE_KEY, JSON.stringify(cache));
     } catch {}
+  }
+
+  function resolveCacheTtl(result) {
+    const isEmptySearch = Array.isArray(result) && result.length === 0;
+    const isUnrated = result?.subject && !result.subject.rate;
+    return isEmptySearch || isUnrated ? PENDING_CACHE_TTL : CACHE_TTL;
   }
 
   function escapeHtml(value) {
@@ -129,7 +131,7 @@
    * - 网络错误 / 5xx：shouldRetry = true
    * - 4xx 及其他客户端错误：shouldRetry = false（重试无意义）
    */
-  function gmRequestSingle(url, headers, data) {
+  function gmRequestSingle(url) {
     return new Promise((resolve) => {
       if (!GM_REQUEST) {
         console.error("GM.xmlHttpRequest is unavailable.");
@@ -138,10 +140,8 @@
       }
 
       GM_REQUEST({
-        method: data ? "POST" : "GET",
+        method: "GET",
         url,
-        headers,
-        data,
         onload: (response) => {
           if (response.status >= 200 && response.status < 400) {
             resolve({ text: response.responseText, shouldRetry: false });
@@ -165,9 +165,9 @@
     });
   }
 
-  async function gmRequest(url, headers, data, retries = 3) {
+  async function gmRequest(url, retries = 3) {
     for (let i = 0; i < retries; i++) {
-      const { text, shouldRetry } = await gmRequestSingle(url, headers, data);
+      const { text, shouldRetry } = await gmRequestSingle(url);
       if (text !== undefined) return text;
       if (!shouldRetry) return undefined; // 4xx：不重试，直接放弃
       if (i < retries - 1) {
@@ -179,24 +179,21 @@
     return undefined;
   }
 
-  async function gmJson(url, headers, data) {
-    // 仅对 GET（无 data）请求做缓存
+  async function gmJson(url) {
     const cacheKey = url;
-    if (!data) {
-      const cached = getCached(cacheKey);
-      if (cached !== null) {
-        console.log(`[Cache hit] ${url}`);
-        return cached;
-      }
+    const cached = getCached(cacheKey);
+    if (cached !== null) {
+      console.log(`[Cache hit] ${url}`);
+      return cached;
     }
 
-    const text = await gmRequest(url, headers, data);
+    const text = await gmRequest(url);
     if (!text) return undefined;
 
     try {
       const result = JSON.parse(text);
-      if (!data && result) {
-        setCache(cacheKey, result);
+      if (result) {
+        setCache(cacheKey, result, resolveCacheTtl(result));
       }
       return result;
     } catch (error) {
@@ -205,8 +202,8 @@
     }
   }
 
-  async function gmJsonp(url, headers, data) {
-    const text = await gmRequest(url, headers, data);
+  async function gmJsonp(url) {
+    const text = await gmRequest(url);
     if (!text) return undefined;
 
     try {
@@ -292,16 +289,13 @@
     });
   }
 
-  function compactNumber(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return value ?? "";
-    return new Intl.NumberFormat("en-US", { notation: "compact" }).format(
-      numeric,
-    );
-  }
-
+  // 输入可能自带千分位（OMDb 的 imdbVotes），先归一化再统一格式化
   function formatVoterCount(value) {
-    return String(value ?? "").replace(/,/g, "");
+    if (value == null || value === "") return "";
+    const numeric = Number(String(value).replace(/,/g, ""));
+    return Number.isFinite(numeric)
+      ? new Intl.NumberFormat("en-US").format(numeric)
+      : String(value);
   }
 
   function injectTop250Style() {
@@ -784,9 +778,12 @@
     // 如果 IMDb 的 React 在后续渲染中移除了我们插入的节点，自动重试插入（最多重试若干次）
     try {
       let retries = 0;
-      const maxRetries = 6; // 尝试 6 次
+      const maxRetries = 6; // 最多重插 6 次
       const observer = new MutationObserver(() => {
         if (document.getElementById("movie-rating-integrator-douban")) return;
+        // 评分块尚未渲染回来时不消耗重试额度，避免频繁 mutation 把额度空烧光
+        const newAnchor = findAnchor();
+        if (!newAnchor) return;
         if (retries++ >= maxRetries) {
           try {
             observer.disconnect();
@@ -795,8 +792,6 @@
           } catch {}
           return;
         }
-        const newAnchor = findAnchor();
-        if (!newAnchor) return;
         const newBadge = buildDoubanBadge(data, ratingStr);
         (newAnchor.parentElement || newAnchor).appendChild(newBadge);
         console.log("[影评聚合] 重新插入豆瓣评分 (retry):", ratingStr || "暂无评分", data.url);
