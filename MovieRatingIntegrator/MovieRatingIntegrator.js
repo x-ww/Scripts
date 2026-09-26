@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.5
+// @version      1.5.6
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
@@ -415,7 +415,7 @@
         max: 10,
         average: abstract?.subject?.rate || "",
       },
-      title: hit.sub_title || hit.title,
+      title: hit.title || hit.sub_title,
     };
   }
 
@@ -696,18 +696,23 @@
   // 很多样式依赖"原来所在的父容器上下文"（百分比高度、flex 隐式约束等），
   // 节点被搬到新位置后这些样式会失效、导致布局塌陷（表现为只剩一行标签、没有分数）。
   // 因此改为插入一个自带内联样式、视觉上风格相近但完全独立于 IMDb 内部 class 的徽标。
+  // ratingStr 为空表示豆瓣条目存在但暂无评分，此时展示片名 + 占位符
   function buildDoubanBadge(data, ratingStr) {
     const badge = document.createElement("div");
     badge.id = "movie-rating-integrator-douban";
     badge.style.cssText =
       "display:flex;flex-direction:column;align-items:center;justify-content:center;margin-left:32px;padding-left:32px;border-left:1px solid rgba(255,255,255,0.15);cursor:pointer;line-height:1.3;font-family:inherit;text-align:center";
-    badge.title = `豆瓣：${data.title}（${ratingStr}）`;
+    badge.title = `豆瓣：${data.title}${ratingStr ? `（${ratingStr}）` : "（暂无评分）"}`;
+    const scoreHtml = ratingStr
+      ? '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#2ea44f;color:#fff;font-size:11px;font-weight:700;line-height:1;flex-shrink:0">豆</span>' +
+        `<span style="font-size:26px;font-weight:700;color:#f5c518">${escapeHtml(ratingStr)}</span>` +
+        '<span style="font-size:14px;color:#a2a2a2">/10</span>'
+      : `<span style="display:inline-block;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:16px;font-weight:700;color:#f5c518">${escapeHtml(data.title)}</span>` +
+        '<span style="font-size:12px;color:#a2a2a2;white-space:nowrap">暂无评分</span>';
     badge.innerHTML =
       '<span style="font-size:13px;font-weight:600;letter-spacing:0.08em;color:#a2a2a2;white-space:nowrap">豆瓣评分</span>' +
       '<span style="display:flex;align-items:center;gap:6px;margin-top:6px">' +
-      '<span style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:4px;background:#2ea44f;color:#fff;font-size:11px;font-weight:700;line-height:1;flex-shrink:0">豆</span>' +
-      `<span style="font-size:26px;font-weight:700;color:#f5c518">${escapeHtml(ratingStr)}</span>` +
-      '<span style="font-size:14px;color:#a2a2a2">/10</span>' +
+      scoreHtml +
       "</span>";
     badge.addEventListener("click", (event) => {
       event.preventDefault();
@@ -749,10 +754,10 @@
 
     const bar = await waitForAny(selectors, 12000);
 
-    // 3) 取豆瓣数据
+    // 3) 取豆瓣数据：条目未找到才跳过；找到但暂无评分时仍显示占位徽标
     const data = await getDoubanInfo(id);
-    if (!data?.rating?.average) {
-      console.warn("[影评聚合] 豆瓣数据缺失，跳过插入");
+    if (!data) {
+      console.warn("[影评聚合] 未找到豆瓣条目，跳过插入");
       return;
     }
     if (document.getElementById("movie-rating-integrator-douban")) return;
@@ -768,14 +773,13 @@
       return;
     }
 
-    const rating = Number(data.rating.average);
-    const ratingStr = Number.isFinite(rating)
-      ? rating.toFixed(1)
-      : data.rating.average;
+    const rating = Number(data.rating?.average);
+    const ratingStr =
+      data.rating?.average && Number.isFinite(rating) ? rating.toFixed(1) : "";
 
     const badge = buildDoubanBadge(data, ratingStr);
     (anchor.parentElement || anchor).appendChild(badge);
-    console.log("[影评聚合] 已插入豆瓣评分:", ratingStr, data.url);
+    console.log("[影评聚合] 已插入豆瓣评分:", ratingStr || "暂无评分", data.url);
 
     // 如果 IMDb 的 React 在后续渲染中移除了我们插入的节点，自动重试插入（最多重试若干次）
     try {
@@ -795,7 +799,7 @@
         if (!newAnchor) return;
         const newBadge = buildDoubanBadge(data, ratingStr);
         (newAnchor.parentElement || newAnchor).appendChild(newBadge);
-        console.log("[影评聚合] 重新插入豆瓣评分 (retry):", ratingStr, data.url);
+        console.log("[影评聚合] 重新插入豆瓣评分 (retry):", ratingStr || "暂无评分", data.url);
       });
       activeObservers.push(observer);
       observer.observe(document.documentElement, { childList: true, subtree: true });
