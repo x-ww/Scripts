@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.6
+// @version      1.6.7
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -578,11 +578,15 @@
   /**
    * 从豆瓣页面取用于搜索的片名。
    *
-   * 注意：豆瓣把中英文名放在同一个节点里，例如
+   * 注意：豆瓣把各语言片名放在同一个节点里，例如
    *   <span property="v:itemreviewed">寻找艾米丽 Finding Emily</span>
-   * 而不是「中文名一个 span、英文名另一个 span」。所以不能靠 DOM 结构
-   * 或字符串相减来分离中英文（相减会把整段都减掉，得到空串）。
-   * 这里改成按字符种类切分：CJK 字符归中文名，其余归英文原名。
+   *   <span property="v:itemreviewed">寄生虫 기생충 Parasite</span>
+   * 而不是每种语言一个 span。所以不能靠 DOM 结构或字符串相减来分离
+   * （相减会把整段都减掉，得到空串），改为按字符种类切分。
+   *
+   * 分四类：汉字/假名/韩文/拉丁，各自归堆。选择搜索词时按召回质量排序：
+   * 英文原名最稳（bt4g 的日韩片资源普遍带英文名），其次日文/韩文原名，
+   * 最后才是中文名。
    */
   function collectSearchTitle() {
     const raw = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
@@ -609,52 +613,96 @@
 
     source = stripYear(source);
 
-    // 按字符种类拆分：CJK 字符归中文名，其余归英文原名。
-    // 注意不能先按空格分词再判断——豆瓣有大量条目中英文之间没有空格，
-    // 例如「奥本海默Oppenheimer」整段会被当成一个 CJK 词，英文名就全丢了。
-    // 因此逐字符扫，遇到字符种类切换时才断开。
-    const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/;
-    // 全角标点也视作中文段落的一部分，避免「，」被归进英文名
+    // 逐字符分类。必须逐字符而不是先按空格分词：
+    // 豆瓣有大量条目各语言名之间没有空格（「奥本海默Oppenheimer」），
+    // 按词判断会把整段当成一个汉字词，英文名就全丢了。
+    const HAN = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/; // 汉字（含日文汉字）
+    const KANA = /[\u3040-\u30ff\u31f0-\u31ff]/; // 平假名 + 片假名
+    // 韩文：谚文音节、字母、兼容字母
+    const HANGUL = /[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7af]/;
+    // 全角标点跟随它前面的文字，避免「，」被单独归进英文名
     const CJK_PUNCT = /[\u3000-\u303f\uff00-\uffef]/;
-    const CJK_CHAR = new RegExp(`^(?:${CJK.source}|${CJK_PUNCT.source})$`);
 
-    // 逐字符切段，把连续同类字符合成一段。
-    // 「沙丘2」「流浪地球2」这类序号数字紧跟中文名，应算中文名的一部分，
-    // 否则会粘到英文名前面变成「2Dune: Part Two」。
-    // 注意必须在字符级判断：数字和拉丁字母同属「非 CJK」，
-    // 若等分段后再处理，它们已经被合并进同一段，就分不开了。
+    const kindOf = (ch) => {
+      if (HAN.test(ch)) return "han";
+      if (KANA.test(ch)) return "kana";
+      if (HANGUL.test(ch)) return "hangul";
+      return "latin";
+    };
+
+    // 逐字符切段，把连续同类字符合成一段
     const segments = [];
-    let sawCjk = false;
     for (const ch of source) {
+      // 全角标点归入前一段，没有前一段时归 latin
       let kind;
-      if (CJK_CHAR.test(ch)) {
-        kind = "cn";
-        sawCjk = true;
-      } else if (sawCjk && /[\d.\s]/.test(ch)) {
-        // 紧跟在中文名后的数字/空格，仍归中文名
-        kind = "cn";
+      if (CJK_PUNCT.test(ch) && segments.length) {
+        kind = segments[segments.length - 1].kind;
       } else {
-        kind = "en";
-        // 遇到真正的拉丁字符说明中文段已结束
-        if (!/[\d.\s]/.test(ch)) sawCjk = false;
+        kind = kindOf(ch);
       }
       const last = segments[segments.length - 1];
       if (last && last.kind === kind) last.text += ch;
       else segments.push({ kind, text: ch });
     }
 
+    // 「沙丘2」「流浪地球2」这类序号数字紧跟汉字，应算汉字名的一部分，
+    // 否则会粘到英文名前面变成「2Dune: Part Two」。
+    // 必须在字符级判断：数字与拉丁字母同属 latin，
+    // 等分段后再处理就已经合并、分不开了。
+    for (let i = 1; i < segments.length; i++) {
+      const seg = segments[i];
+      const prev = segments[i - 1];
+      if (seg.kind === "latin" && prev.kind === "han") {
+        const m = seg.text.match(/^[\d.\s]+/);
+        if (m) {
+          prev.text += m[0];
+          seg.text = seg.text.slice(m[0].length);
+        }
+      }
+    }
+
     const trimEdges = (text) =>
       text.replace(/^[\s:：,，.·\-—/|]+|[\s:：,，.·\-—/|]+$/g, "");
 
-    const cnTitle = trimEdges(
-      segments.filter((s) => s.kind === "cn").map((s) => s.text).join(""),
-    );
-    const enTitle = trimEdges(
-      segments.filter((s) => s.kind === "en").map((s) => s.text).join(" "),
+    const join = (kind, sep) =>
+      trimEdges(
+        segments
+          .filter((s) => s.kind === kind && s.text)
+          .map((s) => trimEdges(s.text))
+          .filter(Boolean)
+          .join(sep),
+      );
+
+    const latin = join("latin", " ");
+    const hangul = join("hangul", " ");
+
+    // 汉字 + 假名按原始顺序拼成一个整体，不要按字符类分堆。
+    // 日文名里汉字和假名交替出现（「千と千尋の神隠し」），
+    // 先分堆再拼会变成「千千尋神隠とのし」，假名顺序全乱。
+    // 中日文混排在一起是无害的：实测「你的名字。 君の名は。」在 bt4g
+    // 仍返回 15 条，所以不需要把中文名和日文名拆开。
+    const eastAsian = trimEdges(
+      segments
+        .filter((s) => s.kind === "han" || s.kind === "kana")
+        .map((s) => s.text)
+        .join(""),
     );
 
-    // 英文原名优先；没有英文部分（纯中文片名）时用中文名
-    return enTitle || cnTitle || source;
+    const hasKana = segments.some((s) => s.kind === "kana");
+    const hasHangul = segments.some((s) => s.kind === "hangul");
+
+    // 优先级：英文原名 > 日文/韩文原名 > 汉字名
+    // bt4g 上日韩片的资源普遍带英文名，召回最稳定。
+    if (latin) return latin;
+
+    if (hasHangul) {
+      // 韩文必须单独用，不能和汉字名拼在一起：
+      // 实测「寄生虫 기생충」直接 0 条，而「기생충」有 5 条。
+      // 优先韩文原名，取不到再用汉字名。
+      return hangul || eastAsian || source;
+    }
+
+    return eastAsian || source;
   }
 
   /**
