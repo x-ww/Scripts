@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.3
+// @version      1.6.4
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -577,51 +577,49 @@
 
   /**
    * 从豆瓣页面取用于搜索的片名。
-   * 豆瓣条目页的标题通常是「希望 Hope」这样的中英并列形式：
-   * 中文名在 span[property='v:itemreviewed'] 里，英文原名在 h1 的其余文本里。
-   * 搜索用英文原名，页面没有原名时才退回中文名。
+   *
+   * 注意：豆瓣把中英文名放在同一个节点里，例如
+   *   <span property="v:itemreviewed">寻找艾米丽 Finding Emily</span>
+   * 而不是「中文名一个 span、英文名另一个 span」。所以不能靠 DOM 结构
+   * 或字符串相减来分离中英文（相减会把整段都减掉，得到空串）。
+   * 这里改成按字符种类切分：CJK 字符归中文名，其余归英文原名。
    */
   function collectSearchTitle() {
-    // 豆瓣 h1 的真实结构是：
-    //   <h1><span property="v:itemreviewed">希望</span><span class="year">(2024)</span></h1>
-    // 少数条目会带副标题或别名，所以不能直接用 h1.textContent 做字符串相减
-    // （h1 只有中文名时相减会得到空串，进而拼出「1993 1993」）。
-    // 这里改为按结构取值：先取 h1 里除 .year 之外的文本，再从中剥离中文名。
-    const cnTitle = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
-    const h1 = qs("h1");
-
-    // 克隆一份 h1 并剔除年份节点，剩下的就是「中文名 + 英文原名」
-    let h1Text = "";
-    if (h1) {
+    const raw = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
+    // 无 v:itemreviewed 时退回 h1 文本（并剔除年份节点）
+    let source = raw;
+    if (!source) {
+      const h1 = qs("h1");
       try {
         const clone = h1.cloneNode(true);
-        clone
-          .querySelectorAll(".year, [property='v:initialReleaseDate']")
-          .forEach((node) => node.remove());
-        h1Text = (clone.textContent || "").trim();
+        clone.querySelectorAll(".year").forEach((node) => node.remove());
+        source = (clone.textContent || "").trim();
       } catch {
-        h1Text = "";
-      }
-      // 兜底：环境不支持 cloneNode 或结构异常时，直接用原文相减
-      if (!h1Text) {
-        h1Text = (h1.textContent || "").trim();
+        source = (h1?.textContent || "").trim();
       }
     }
 
-    // 去掉中文名，剩下的就是英文原名
-    const enTitle = cnTitle ? h1Text.replace(cnTitle, "").trim() : h1Text;
-
-    const clean = (text) =>
+    const stripYear = (text) =>
       (text || "")
-        // 去掉「又名:」之类的前缀
         .replace(/^(又名|譯名|译名)\s*[:：]/, "")
-        // 去掉年份后缀：可能是「(2024)」带括号，也可能是行尾裸年份
         .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
         .replace(/\s+\d{4}\s*$/, "")
         .replace(/\s+/g, " ")
         .trim();
 
-    return clean(enTitle) || clean(cnTitle);
+    source = stripYear(source);
+
+    // 按字符种类拆分：连续的 CJK 片段 vs 其余（拉丁字母、数字、标点）
+    const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/;
+    const parts = source.split(/\s+/);
+    const cnParts = parts.filter((w) => CJK.test(w));
+    const enParts = parts.filter((w) => !CJK.test(w));
+
+    // 英文原名优先；没有英文部分（纯中文片名）时用中文名
+    const enTitle = enParts.join(" ").replace(/^[\s:：,，.-]+|[\s:：,，.-]+$/g, "");
+    const cnTitle = cnParts.join(" ");
+
+    return enTitle || cnTitle || source;
   }
 
   /**
