@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.2
+// @version      1.6.3
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -582,17 +582,42 @@
    * 搜索用英文原名，页面没有原名时才退回中文名。
    */
   function collectSearchTitle() {
-    const h1Text = (qs("h1")?.textContent || "").trim();
+    // 豆瓣 h1 的真实结构是：
+    //   <h1><span property="v:itemreviewed">希望</span><span class="year">(2024)</span></h1>
+    // 少数条目会带副标题或别名，所以不能直接用 h1.textContent 做字符串相减
+    // （h1 只有中文名时相减会得到空串，进而拼出「1993 1993」）。
+    // 这里改为按结构取值：先取 h1 里除 .year 之外的文本，再从中剥离中文名。
     const cnTitle = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
-    // 用 h1 全文减去中文名，剩下的就是英文原名
-    const enTitle = h1Text.replace(cnTitle, "").trim();
+    const h1 = qs("h1");
+
+    // 克隆一份 h1 并剔除年份节点，剩下的就是「中文名 + 英文原名」
+    let h1Text = "";
+    if (h1) {
+      try {
+        const clone = h1.cloneNode(true);
+        clone
+          .querySelectorAll(".year, [property='v:initialReleaseDate']")
+          .forEach((node) => node.remove());
+        h1Text = (clone.textContent || "").trim();
+      } catch {
+        h1Text = "";
+      }
+      // 兜底：环境不支持 cloneNode 或结构异常时，直接用原文相减
+      if (!h1Text) {
+        h1Text = (h1.textContent || "").trim();
+      }
+    }
+
+    // 去掉中文名，剩下的就是英文原名
+    const enTitle = cnTitle ? h1Text.replace(cnTitle, "").trim() : h1Text;
 
     const clean = (text) =>
       (text || "")
         // 去掉「又名:」之类的前缀
         .replace(/^(又名|譯名|译名)\s*[:：]/, "")
-        // 去掉年份后缀（中英文括号）
+        // 去掉年份后缀：可能是「(2024)」带括号，也可能是行尾裸年份
         .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
+        .replace(/\s+\d{4}\s*$/, "")
         .replace(/\s+/g, " ")
         .trim();
 
