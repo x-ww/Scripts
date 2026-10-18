@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.5
+// @version      1.6.6
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -609,16 +609,51 @@
 
     source = stripYear(source);
 
-    // 按字符种类拆分：连续的 CJK 片段 vs 其余（拉丁字母、数字、标点）
+    // 按字符种类拆分：CJK 字符归中文名，其余归英文原名。
+    // 注意不能先按空格分词再判断——豆瓣有大量条目中英文之间没有空格，
+    // 例如「奥本海默Oppenheimer」整段会被当成一个 CJK 词，英文名就全丢了。
+    // 因此逐字符扫，遇到字符种类切换时才断开。
     const CJK = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff]/;
-    const parts = source.split(/\s+/);
-    const cnParts = parts.filter((w) => CJK.test(w));
-    const enParts = parts.filter((w) => !CJK.test(w));
+    // 全角标点也视作中文段落的一部分，避免「，」被归进英文名
+    const CJK_PUNCT = /[\u3000-\u303f\uff00-\uffef]/;
+    const CJK_CHAR = new RegExp(`^(?:${CJK.source}|${CJK_PUNCT.source})$`);
+
+    // 逐字符切段，把连续同类字符合成一段。
+    // 「沙丘2」「流浪地球2」这类序号数字紧跟中文名，应算中文名的一部分，
+    // 否则会粘到英文名前面变成「2Dune: Part Two」。
+    // 注意必须在字符级判断：数字和拉丁字母同属「非 CJK」，
+    // 若等分段后再处理，它们已经被合并进同一段，就分不开了。
+    const segments = [];
+    let sawCjk = false;
+    for (const ch of source) {
+      let kind;
+      if (CJK_CHAR.test(ch)) {
+        kind = "cn";
+        sawCjk = true;
+      } else if (sawCjk && /[\d.\s]/.test(ch)) {
+        // 紧跟在中文名后的数字/空格，仍归中文名
+        kind = "cn";
+      } else {
+        kind = "en";
+        // 遇到真正的拉丁字符说明中文段已结束
+        if (!/[\d.\s]/.test(ch)) sawCjk = false;
+      }
+      const last = segments[segments.length - 1];
+      if (last && last.kind === kind) last.text += ch;
+      else segments.push({ kind, text: ch });
+    }
+
+    const trimEdges = (text) =>
+      text.replace(/^[\s:：,，.·\-—/|]+|[\s:：,，.·\-—/|]+$/g, "");
+
+    const cnTitle = trimEdges(
+      segments.filter((s) => s.kind === "cn").map((s) => s.text).join(""),
+    );
+    const enTitle = trimEdges(
+      segments.filter((s) => s.kind === "en").map((s) => s.text).join(" "),
+    );
 
     // 英文原名优先；没有英文部分（纯中文片名）时用中文名
-    const enTitle = enParts.join(" ").replace(/^[\s:：,，.-]+|[\s:：,，.-]+$/g, "");
-    const cnTitle = cnParts.join(" ");
-
     return enTitle || cnTitle || source;
   }
 
@@ -629,8 +664,11 @@
    * category=movie 过滤掉音乐/文档/软件，减少成人内容的混入。
    */
   function buildBt4gUrl(title, year) {
+    // 片名为空时拼年份会得到「q=+2024」这类脏查询，这里统一 trim
+    const name = String(title || "").trim();
+    const query = name ? (year ? `${name} ${year}` : name) : "";
     const params = new URLSearchParams();
-    params.set("q", year ? `${title} ${year}` : title);
+    params.set("q", query);
     params.set("category", "movie");
     params.set("orderby", BT4G_ORDERBY);
     return `${BT4G_BASE}/search?${params.toString()}`;
@@ -754,27 +792,30 @@
 
     if (document.getElementById("movie-rating-integrator-extra")) return;
 
+    // IMDb 字段只是评分聚合的输入；没有它时评分区块留空，
+    // 但 BT4G 入口与评分无关，仍应正常提供，所以不能直接 return。
     const imdbLabel = qsa("#info > span.pl").find(
       (node) => node.innerText.trim() === "IMDb:",
     );
     const imdbNode = imdbLabel?.nextSibling;
-    if (!imdbNode) return;
+    const imdbId = imdbNode
+      ? linkify(imdbNode, "https://www.imdb.com/title/")
+      : null;
 
-    const imdbId = linkify(imdbNode, "https://www.imdb.com/title/");
-    if (!imdbId) return;
-
-    const data = await getIMDbInfo(imdbId);
+    const data = imdbId ? await getIMDbInfo(imdbId) : null;
     const hasRottenTomatoes = Boolean(
       data?.Ratings?.find((item) => item.Source === "Rotten Tomatoes")?.Value,
     );
     const hasExtraInfo = !isNA(data?.Rated) || !isNA(data?.BoxOffice);
-    // OMDb 没数据时不插入评分区块，但 BT4G 入口与评分无关，仍然照常提供
     const hasRatings =
       Boolean(data) &&
       (!isNA(data.imdbRating) ||
         !isNA(data.Metascore) ||
         hasRottenTomatoes ||
         hasExtraInfo);
+    // 既没有评分也没有 IMDb 编号时，整个区块（只有 BT4G 按钮）也值得显示
+    const shouldRender = hasRatings || Boolean(collectSearchTitle());
+    if (!shouldRender) return;
 
     const ratings = document.createElement("div");
     ratings.id = "movie-rating-integrator-extra";
