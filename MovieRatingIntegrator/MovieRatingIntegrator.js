@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.1
+// @version      1.6.2
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -20,8 +20,8 @@
 // @grant        GM_setValue
 // @homepageURL  https://github.com/x-ww/MovieRatingIntegrator
 // @supportURL   https://github.com/x-ww/MovieRatingIntegrator/issues
-// @updateURL    https://raw.githubusercontent.com/x-ww/Scripts/main/MovieRatingIntegrator/MovieRatingIntegrator.js
-// @downloadURL  https://raw.githubusercontent.com/x-ww/Scripts/main/MovieRatingIntegrator/MovieRatingIntegrator.js
+// @updateURL    https://github.com/x-ww/Scripts/raw/main/MovieRatingIntegrator/MovieRatingIntegrator.js
+// @downloadURL  https://github.com/x-ww/Scripts/raw/main/MovieRatingIntegrator/MovieRatingIntegrator.js
 // @noframes
 // @run-at       document-end
 // ==/UserScript==
@@ -577,12 +577,11 @@
 
   /**
    * 从豆瓣页面取用于搜索的片名。
-   * 豆瓣条目页的标题通常是「奥本海默 Oppenheimer」这样的中英并列形式：
+   * 豆瓣条目页的标题通常是「希望 Hope」这样的中英并列形式：
    * 中文名在 span[property='v:itemreviewed'] 里，英文原名在 h1 的其余文本里。
-   * bt4g 的资源文件命名以原名/英文为主，因此优先取英文原名，
-   * 取不到英文名时才退回中文名。
+   * 搜索用英文原名，页面没有原名时才退回中文名。
    */
-  function collectSearchTitles() {
+  function collectSearchTitle() {
     const h1Text = (qs("h1")?.textContent || "").trim();
     const cnTitle = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
     // 用 h1 全文减去中文名，剩下的就是英文原名
@@ -590,26 +589,20 @@
 
     const clean = (text) =>
       (text || "")
-        // 去掉年份后缀（中英文括号）与「又名:」之类的前缀
+        // 去掉「又名:」之类的前缀
         .replace(/^(又名|譯名|译名)\s*[:：]/, "")
+        // 去掉年份后缀（中英文括号）
         .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
         .replace(/\s+/g, " ")
         .trim();
 
-    // 英文原名优先；纯中文名也保留作为兜底，但排在后面
-    return (
-      [clean(enTitle), clean(cnTitle)]
-        // 空值、以及误把「豆瓣」当作片名的情况
-        .filter((text) => text && text !== "豆瓣")
-        // 去重，保持原顺序
-        .filter((text, index, list) => list.indexOf(text) === index)
-    );
+    return clean(enTitle) || clean(cnTitle);
   }
 
   /**
    * 构造 bt4g 搜索页地址。
-   * q 用「片名 + 年份」提高精度：bt4g 是子串匹配、空格多词 AND，
-   * 只给片名会召回同名剧集、续作和无关内容。
+   * q 用「英文原名 + 年份」提高精度：bt4g 对空格分隔的多词是宽松匹配，
+   * 只有片名时会混进同名续作、剧集和无关内容。
    * category=movie 过滤掉音乐/文档/软件，减少成人内容的混入。
    */
   function buildBt4gUrl(title, year) {
@@ -633,23 +626,18 @@
   /**
    * 评分区块下方的 BT4G 搜索入口。
    * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
-   */
-  /**
-   * 评分区块下方的 BT4G 搜索入口。
-   * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
    * 页面上只保留一个按钮，不加标题/说明文字，避免干扰评分区块。
    */
-  function renderBt4gSection(container, titles, year) {
+  function renderBt4gSection(container, title, year) {
     // 用全局查询判断是否已插入：container 是刚刚创建的空节点，
     // 在其中查询永远查不到，起不到幂等保护作用
     if (document.getElementById(BT4G_BUTTON_ID)) return;
-    if (!titles.length) {
+    if (!title) {
       console.warn("[影评聚合] 未能取到片名，跳过 BT4G 入口");
       return;
     }
 
-    // 主查询：英文原名（取不到时退回中文名）+ 年份
-    const title = titles[0];
+    // 查询词：英文原名 + 年份
     const primaryUrl = safeUrl(buildBt4gUrl(title, year));
     if (!primaryUrl) return;
 
@@ -658,7 +646,7 @@
     section.style.cssText =
       "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;";
 
-    const label = year ? `${title} ${year}` : title;
+    const label = year ? `${title} (${year})` : title;
     section.innerHTML =
       `<a href="${primaryUrl}" target="_blank" rel="noopener noreferrer" ` +
       'style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:#2ea44f;color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ' +
@@ -779,7 +767,7 @@
     }
 
     // 评分区块下方：BT4G 资源搜索入口（手动点击，脚本不发任何请求）
-    renderBt4gSection(ratings, collectSearchTitles(), getSubjectYear());
+    renderBt4gSection(ratings, collectSearchTitle(), getSubjectYear());
 
     if (hasRatings) {
       if (!isNA(data.Rated)) insertDoubanInfo("MPAA评级", data.Rated);
