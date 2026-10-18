@@ -3,10 +3,10 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.5.7
-// @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
-// @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb
-// @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic）
+// @version      1.6.0
+// @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
+// @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
+// @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @author       x-ww
 // @match        *://movie.douban.com/subject/*
 // @match        *://www.douban.com/personage/*
@@ -45,6 +45,16 @@
   const IMDB_TOP_STYLE_ID = "movie-rating-integrator-top250-style";
   const DOUBAN_RECOVERED_TITLE = "Rating recovered by script.";
   const host = location.hostname;
+
+  // ─── BT4G 资源搜索入口 ───
+  // 点击后才跳转，脚本本身不请求 bt4g（其搜索接口有 IP 级限流，
+  // 超限返回 429 并封禁 10 分钟；且 RSS 每页固定 15 条、无法翻页），
+  // 因此无需 @connect，全部搜索与筛选都在 bt4g 站点内完成。
+  const BT4G_BASE = "https://bt4gprx.com";
+  // 按做种数排序：默认的相关性排序会把 "OPPENHEIMER ONLINE FULL MOVIE"
+  // 这类垃圾/推广源排在最前，做种数排序实测前几条都是可用的中字版本
+  const BT4G_ORDERBY = "seeders";
+  const BT4G_BUTTON_ID = "movie-rating-integrator-bt4g";
 
   // 原脚本这里是 base64 编码的图标，文件被截断后已损坏，改用 emoji 代替
   const TOMATO_ICON_FRESH = "🍅";
@@ -565,6 +575,106 @@
     );
   }
 
+  /**
+   * 从豆瓣页面取片名，按"可信度"排序。
+   * 豆瓣条目页通常是《奥本海默》Oppenheimer (2023) 这种双标题，
+   * 而 bt4g 的资源大量由中文压制组发布、文件名里只有中文名，
+   * 所以中文优先，英文/原名兜底。
+   */
+  function collectDoubanTitles() {
+    const candidates = [
+      qs("[property='v:itemreviewed']")?.textContent,
+      qs("h1 span[property='v:itemreviewed']")?.textContent,
+      qs("h1")?.textContent,
+    ];
+
+    return (
+      candidates
+        // 去掉年份后缀与全角括号，保留片名本身
+        .map((text) =>
+          (text || "")
+            .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
+            .replace(/\s+/g, " ")
+            .trim(),
+        )
+        .filter((text) => text && text !== "豆瓣")
+        // 去重，保持原顺序
+        .filter((text, index, list) => list.indexOf(text) === index)
+    );
+  }
+
+  /**
+   * 构造 bt4g 搜索页地址。
+   * q 用「片名 + 年份」提高精度：bt4g 是子串匹配、空格多词 AND，
+   * 只给片名会召回同名剧集、续作和无关内容。
+   * category=movie 过滤掉音乐/文档/软件，减少成人内容的混入。
+   */
+  function buildBt4gUrl(title, year) {
+    const params = new URLSearchParams();
+    params.set("q", year ? `${title} ${year}` : title);
+    params.set("category", "movie");
+    params.set("orderby", BT4G_ORDERBY);
+    return `${BT4G_BASE}/search?${params.toString()}`;
+  }
+
+  function getSubjectYear() {
+    // 优先用条目页的年份字段，回退到标题里的 (2023)
+    const yearField = qsa("#info > span.pl")
+      .find((node) => node.innerText.trim() === "上映日期:")
+      ?.nextSibling?.textContent;
+    const fromField = yearField?.match(/(\d{4})/)?.[1];
+    const fromTitle = document.title.match(/\((\d{4})\)/)?.[1];
+    return fromField || fromTitle || "";
+  }
+
+  /**
+   * 评分区块下方的 BT4G 搜索入口。
+   * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
+   */
+  function renderBt4gSection(container, titles, year) {
+    // 用全局查询判断是否已插入：container 是刚刚创建的空节点，
+    // 在其中查询永远查不到，起不到幂等保护作用
+    if (document.getElementById(BT4G_BUTTON_ID)) return;
+    if (!titles.length) {
+      console.warn("[影评聚合] 未能取到片名，跳过 BT4G 入口");
+      return;
+    }
+
+    // 主查询：最可信的片名 + 年份；备用查询：其余片名，便于手动切换
+    const [primaryTitle, ...altTitles] = titles;
+    const primaryUrl = safeUrl(buildBt4gUrl(primaryTitle, year));
+    if (!primaryUrl) return;
+
+    const section = document.createElement("div");
+    section.id = BT4G_BUTTON_ID;
+    section.style.cssText =
+      "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;";
+
+    const label = year ? `${primaryTitle} (${year})` : primaryTitle;
+    const altLinks = altTitles
+      .map((title) => {
+        const url = safeUrl(buildBt4gUrl(title, year));
+        return url
+          ? `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#37a;margin-left:8px">${escapeHtml(title)}</a>`
+          : "";
+      })
+      .join("");
+
+    section.innerHTML =
+      '<div class="pl" style="margin-bottom:6px">BT4G 资源搜索</div>' +
+      `<a href="${primaryUrl}" target="_blank" rel="noopener noreferrer" ` +
+      'style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:#2ea44f;color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ' +
+      `title="在 bt4gprx.com 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
+      "🎬 去 BT4G 搜索" +
+      "</a>" +
+      `<span style="margin-left:10px;color:#666;font-size:12px">按做种数排序 · ${escapeHtml(label)}</span>` +
+      (altLinks
+        ? `<div style="margin-top:6px;font-size:12px;color:#666">也可试试：${altLinks}</div>`
+        : "");
+
+    container.appendChild(section);
+  }
+
   function ensureRecoveredDoubanRating(dbId) {
     const subjectWrap = qs(".subjectwrap");
     const subject = qs(".subject");
@@ -626,14 +736,13 @@
       data?.Ratings?.find((item) => item.Source === "Rotten Tomatoes")?.Value,
     );
     const hasExtraInfo = !isNA(data?.Rated) || !isNA(data?.BoxOffice);
-    if (
-      !data ||
-      (isNA(data.imdbRating) &&
-        isNA(data.Metascore) &&
-        !hasRottenTomatoes &&
-        !hasExtraInfo)
-    )
-      return;
+    // OMDb 没数据时不插入评分区块，但 BT4G 入口与评分无关，仍然照常提供
+    const hasRatings =
+      Boolean(data) &&
+      (!isNA(data.imdbRating) ||
+        !isNA(data.Metascore) ||
+        hasRottenTomatoes ||
+        hasExtraInfo);
 
     const ratings = document.createElement("div");
     ratings.id = "movie-rating-integrator-extra";
@@ -649,32 +758,39 @@
       recommendation.style.width = "488px";
     }
 
-    if (!isNA(data.imdbRating)) {
-      insertDoubanRating(
-        ratings,
-        "IMDb评分",
-        data.imdbRating,
-        `https://www.imdb.com/title/${imdbId}/ratings`,
-        data.imdbVotes,
-        data.histogram,
-      );
-
-      if (!isNA(data.topRank) && data.topRank <= 250 && !qs(".top250")) {
-        injectTop250Style();
-        (
-          document.getElementById("dale_movie_subject_top_icon") || qs("h1")
-        )?.insertAdjacentHTML(
-          "beforebegin",
-          `<div class="top250"><span class="top250-no">No.${data.topRank}</span><span class="top250-link"><a href="https://www.imdb.com/chart/top">IMDb Top 250</a></span></div>`,
+    if (hasRatings) {
+      if (!isNA(data.imdbRating)) {
+        insertDoubanRating(
+          ratings,
+          "IMDb评分",
+          data.imdbRating,
+          `https://www.imdb.com/title/${imdbId}/ratings`,
+          data.imdbVotes,
+          data.histogram,
         );
+
+        if (!isNA(data.topRank) && data.topRank <= 250 && !qs(".top250")) {
+          injectTop250Style();
+          (
+            document.getElementById("dale_movie_subject_top_icon") || qs("h1")
+          )?.insertAdjacentHTML(
+            "beforebegin",
+            `<div class="top250"><span class="top250-no">No.${data.topRank}</span><span class="top250-link"><a href="https://www.imdb.com/chart/top">IMDb Top 250</a></span></div>`,
+          );
+        }
       }
+
+      renderMetascore(ratings, data);
+      renderRottenTomatoes(ratings, data);
     }
 
-    renderMetascore(ratings, data);
-    renderRottenTomatoes(ratings, data);
+    // 评分区块下方：BT4G 资源搜索入口（手动点击，脚本不发任何请求）
+    renderBt4gSection(ratings, collectDoubanTitles(), getSubjectYear());
 
-    if (!isNA(data.Rated)) insertDoubanInfo("MPAA评级", data.Rated);
-    if (!isNA(data.BoxOffice)) insertDoubanInfo("票房", data.BoxOffice);
+    if (hasRatings) {
+      if (!isNA(data.Rated)) insertDoubanInfo("MPAA评级", data.Rated);
+      if (!isNA(data.BoxOffice)) insertDoubanInfo("票房", data.BoxOffice);
+    }
   }
 
   function handleDoubanPersonPage() {
