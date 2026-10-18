@@ -52,7 +52,7 @@
   // 因此无需 @connect，全部搜索与筛选都在 bt4g 站点内完成。
   const BT4G_BASE = "https://bt4gprx.com";
   // 按做种数排序：默认的相关性排序会把 "OPPENHEIMER ONLINE FULL MOVIE"
-  // 这类垃圾/推广源排在最前，做种数排序实测前几条都是可用的中字版本
+  // 这类垃圾/推广源排在最前，做种数排序实测前几条都是可用版本
   const BT4G_ORDERBY = "seeders";
   const BT4G_BUTTON_ID = "movie-rating-integrator-bt4g";
 
@@ -576,27 +576,30 @@
   }
 
   /**
-   * 从豆瓣页面取片名，按"可信度"排序。
-   * 豆瓣条目页通常是《奥本海默》Oppenheimer (2023) 这种双标题，
-   * 而 bt4g 的资源大量由中文压制组发布、文件名里只有中文名，
-   * 所以中文优先，英文/原名兜底。
+   * 从豆瓣页面取用于搜索的片名。
+   * 豆瓣条目页的标题通常是「奥本海默 Oppenheimer」这样的中英并列形式：
+   * 中文名在 span[property='v:itemreviewed'] 里，英文原名在 h1 的其余文本里。
+   * bt4g 的资源文件命名以原名/英文为主，因此优先取英文原名，
+   * 取不到英文名时才退回中文名。
    */
-  function collectDoubanTitles() {
-    const candidates = [
-      qs("[property='v:itemreviewed']")?.textContent,
-      qs("h1 span[property='v:itemreviewed']")?.textContent,
-      qs("h1")?.textContent,
-    ];
+  function collectSearchTitles() {
+    const h1Text = (qs("h1")?.textContent || "").trim();
+    const cnTitle = (qs("[property='v:itemreviewed']")?.textContent || "").trim();
+    // 用 h1 全文减去中文名，剩下的就是英文原名
+    const enTitle = h1Text.replace(cnTitle, "").trim();
 
+    const clean = (text) =>
+      (text || "")
+        // 去掉年份后缀（中英文括号）与「又名:」之类的前缀
+        .replace(/^(又名|譯名|译名)\s*[:：]/, "")
+        .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+    // 英文原名优先；纯中文名也保留作为兜底，但排在后面
     return (
-      candidates
-        // 去掉年份后缀与全角括号，保留片名本身
-        .map((text) =>
-          (text || "")
-            .replace(/\s*[(（]\s*\d{4}\s*[)）]\s*$/, "")
-            .replace(/\s+/g, " ")
-            .trim(),
-        )
+      [clean(enTitle), clean(cnTitle)]
+        // 空值、以及误把「豆瓣」当作片名的情况
         .filter((text) => text && text !== "豆瓣")
         // 去重，保持原顺序
         .filter((text, index, list) => list.indexOf(text) === index)
@@ -631,6 +634,11 @@
    * 评分区块下方的 BT4G 搜索入口。
    * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
    */
+  /**
+   * 评分区块下方的 BT4G 搜索入口。
+   * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
+   * 页面上只保留一个按钮，不加标题/说明文字，避免干扰评分区块。
+   */
   function renderBt4gSection(container, titles, year) {
     // 用全局查询判断是否已插入：container 是刚刚创建的空节点，
     // 在其中查询永远查不到，起不到幂等保护作用
@@ -640,9 +648,9 @@
       return;
     }
 
-    // 主查询：最可信的片名 + 年份；备用查询：其余片名，便于手动切换
-    const [primaryTitle, ...altTitles] = titles;
-    const primaryUrl = safeUrl(buildBt4gUrl(primaryTitle, year));
+    // 主查询：英文原名（取不到时退回中文名）+ 年份
+    const title = titles[0];
+    const primaryUrl = safeUrl(buildBt4gUrl(title, year));
     if (!primaryUrl) return;
 
     const section = document.createElement("div");
@@ -650,27 +658,13 @@
     section.style.cssText =
       "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;";
 
-    const label = year ? `${primaryTitle} (${year})` : primaryTitle;
-    const altLinks = altTitles
-      .map((title) => {
-        const url = safeUrl(buildBt4gUrl(title, year));
-        return url
-          ? `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#37a;margin-left:8px">${escapeHtml(title)}</a>`
-          : "";
-      })
-      .join("");
-
+    const label = year ? `${title} ${year}` : title;
     section.innerHTML =
-      '<div class="pl" style="margin-bottom:6px">BT4G 资源搜索</div>' +
       `<a href="${primaryUrl}" target="_blank" rel="noopener noreferrer" ` +
       'style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:#2ea44f;color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ' +
       `title="在 bt4gprx.com 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
       "🎬 去 BT4G 搜索" +
-      "</a>" +
-      `<span style="margin-left:10px;color:#666;font-size:12px">按做种数排序 · ${escapeHtml(label)}</span>` +
-      (altLinks
-        ? `<div style="margin-top:6px;font-size:12px;color:#666">也可试试：${altLinks}</div>`
-        : "");
+      "</a>";
 
     container.appendChild(section);
   }
@@ -785,7 +779,7 @@
     }
 
     // 评分区块下方：BT4G 资源搜索入口（手动点击，脚本不发任何请求）
-    renderBt4gSection(ratings, collectDoubanTitles(), getSubjectYear());
+    renderBt4gSection(ratings, collectSearchTitles(), getSubjectYear());
 
     if (hasRatings) {
       if (!isNA(data.Rated)) insertDoubanInfo("MPAA评级", data.Rated);
