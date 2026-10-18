@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.4
+// @version      1.6.5
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -636,14 +636,41 @@
     return `${BT4G_BASE}/search?${params.toString()}`;
   }
 
+  /**
+   * 取影片年份。按可靠性依次兜底：
+   * 1) h1 里的 span.year —— 豆瓣新版页面固定有这个节点，最可靠
+   * 2) #info 里的「上映日期:」字段 —— 老版页面/部分条目才有
+   * 3) h1 里任何「(2026)」样式的括号年份
+   * 4) document.title —— 注意新版是「片名 (豆瓣)」，通常不含年份
+   * 5) #info 中出现在括号里的年份（如「中国大陆 / 2026-01-30」）
+   */
   function getSubjectYear() {
-    // 优先用条目页的年份字段，回退到标题里的 (2023)
-    const yearField = qsa("#info > span.pl")
-      .find((node) => node.innerText.trim() === "上映日期:")
-      ?.nextSibling?.textContent;
-    const fromField = yearField?.match(/(\d{4})/)?.[1];
-    const fromTitle = document.title.match(/\((\d{4})\)/)?.[1];
-    return fromField || fromTitle || "";
+    const toYear = (text) => String(text || "").match(/\b(18|19|20)\d{2}\b/)?.[0] || "";
+
+    // 1) h1 > span.year
+    const fromYearSpan = toYear(qs("h1 .year")?.textContent);
+    if (fromYearSpan) return fromYearSpan;
+
+    // 2) #info 里的上映日期字段（标签可能是「上映日期」「上映时间」）
+    const infoLabels = qsa("#info > span.pl");
+    for (const node of infoLabels) {
+      if (/上映(日期|时间)|首播/.test(node.innerText.trim())) {
+        const year = toYear(node.nextSibling?.textContent);
+        if (year) return year;
+      }
+    }
+
+    // 3) h1 中的括号年份
+    const fromH1 = toYear((qs("h1")?.textContent || "").match(/[(（]\s*((?:18|19|20)\d{2})\s*[)）]/)?.[1]);
+    if (fromH1) return fromH1;
+
+    // 4) document.title
+    const fromTitle = toYear(document.title.match(/[(（]\s*((?:18|19|20)\d{2})\s*[)）]/)?.[1]);
+    if (fromTitle) return fromTitle;
+
+    // 5) #info 全文里出现的第一个年份
+    const infoText = document.querySelector("#info")?.textContent || "";
+    return toYear(infoText);
   }
 
   /**
