@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.7.1
+// @version      1.7.2
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -856,9 +856,13 @@
 
     const section = document.createElement("div");
     section.id = SEARCH_BUTTON_ID;
+    // 竖排而不是横排：豆瓣评分栏只有 ~260px 宽，两个按钮横着放会贴边甚至换行。
+    // 用 column + align-items:stretch 让每个按钮撑满整栏宽度，
+    // 两个按钮的宽度就由容器统一决定，不再随「BT4G」「UIndex」的字数差
+    // 而一窄一宽（实测文字宽度差 14px）。文字用 justify-content 居中。
     section.style.cssText =
       "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;" +
-      "display:flex;flex-wrap:wrap;align-items:center;gap:8px;";
+      "display:flex;flex-direction:column;align-items:stretch;gap:8px;";
 
     const label = year ? `${title} (${year})` : title;
     // 图标与文字之间用 gap 控制间距，所以 SVG 后面不再拼空格，
@@ -874,7 +878,7 @@
       .map(
         ({ site, href }) =>
           `<a href="${href}" target="_blank" rel="noopener noreferrer" ` +
-          `style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:${site.color};color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ` +
+          `style="display:flex;align-items:center;justify-content:center;gap:6px;padding:5px 12px;background:${site.color};color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6;box-sizing:border-box" ` +
           `title="在 ${escapeHtml(site.label)} 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
           `${icon(site.icon)}去 ${escapeHtml(site.label)} 搜索` +
           "</a>",
