@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.6.7
+// @version      1.7.0
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -46,15 +46,45 @@
   const DOUBAN_RECOVERED_TITLE = "Rating recovered by script.";
   const host = location.hostname;
 
-  // ─── BT4G 资源搜索入口 ───
-  // 点击后才跳转，脚本本身不请求 bt4g（其搜索接口有 IP 级限流，
-  // 超限返回 429 并封禁 10 分钟；且 RSS 每页固定 15 条、无法翻页），
-  // 因此无需 @connect，全部搜索与筛选都在 bt4g 站点内完成。
-  const BT4G_BASE = "https://bt4gprx.com";
-  // 按做种数排序：默认的相关性排序会把 "OPPENHEIMER ONLINE FULL MOVIE"
-  // 这类垃圾/推广源排在最前，做种数排序实测前几条都是可用版本
-  const BT4G_ORDERBY = "seeders";
-  const BT4G_BUTTON_ID = "movie-rating-integrator-bt4g";
+  // ─── 资源站搜索入口 ───
+  // 点击后才跳转，脚本本身不请求 bt4g / uindex（bt4g 的搜索接口有 IP 级
+  // 限流，超限返回 429 并封禁 10 分钟；uindex 有 Cloudflare 挑战）。
+  // 因此无需为它们添加 @connect，全部搜索与筛选都在目标站内完成。
+  // 站点选择走一个可配置列表：某个镜像挂了或需要换域名，只改这里。
+  const SEARCH_BUTTON_ID = "movie-rating-integrator-search";
+  // 只拼搜索词，不替用户预设任何筛选条件——分类、排序、分辨率都由用户
+  // 在站点内自己选。想恢复「只搜影视 + 按做种数排序」，把下面被注释掉的
+  // params.set 取消注释即可（bt4g 的参数是 category / orderby，
+  // uindex 的分类参数是 c，c=1 为电影）。
+  const SEARCH_SITES = [
+    {
+      id: "bt4g",
+      label: "BT4G",
+      emoji: "🎬",
+      color: "#2ea44f",
+      buildUrl: (title, year) => {
+        const params = new URLSearchParams();
+        params.set("q", buildSearchQuery(title, year));
+        // params.set("category", "movie");
+        // params.set("orderby", "seeders");
+        return `https://bt4gprx.com/search?${params.toString()}`;
+      },
+    },
+    {
+      id: "uindex",
+      label: "UIndex",
+      emoji: "🔎",
+      color: "#0969da",
+      // 用站点搜索框自己的参数名 search（<form id="searchform" action="/search.php">），
+      // 不带分类参数时搜全站。
+      buildUrl: (title, year) => {
+        const params = new URLSearchParams();
+        params.set("search", buildSearchQuery(title, year));
+        // params.set("c", "1"); // 1=Movies 2=TV 3=Games 4=Music 5=Apps 6=XXX 7=Anime 8=Other
+        return `https://uindex.org/search.php?${params.toString()}`;
+      },
+    },
+  ];
 
   // 原脚本这里是 base64 编码的图标，文件被截断后已损坏，改用 emoji 代替
   const TOMATO_ICON_FRESH = "🍅";
@@ -620,8 +650,10 @@
     const KANA = /[\u3040-\u30ff\u31f0-\u31ff]/; // 平假名 + 片假名
     // 韩文：谚文音节、字母、兼容字母
     const HANGUL = /[\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7af]/;
-    // 全角标点跟随它前面的文字，避免「，」被单独归进英文名
-    const CJK_PUNCT = /[\u3000-\u303f\uff00-\uffef]/;
+    // 全角标点/全角问号跟随它前面的文字，避免「，」被单独归进英文名。
+    // 但「：」「:」要排除：它后面跟数字时是「星球大战7.1」这类序号里的
+    // 小数点或章节标记，跟着箭头走会变成「星球大战 : 1」。
+    const CJK_PUNCT = /[\u3000-\u303e\uff01-\uff0f\uff1b-\uff65]/;
 
     const kindOf = (ch) => {
       if (HAN.test(ch)) return "han";
@@ -649,15 +681,41 @@
     // 否则会粘到英文名前面变成「2Dune: Part Two」。
     // 必须在字符级判断：数字与拉丁字母同属 latin，
     // 等分段后再处理就已经合并、分不开了。
+    //
+    // 但只搬「隶属于汉字名的数字」：「流浪地球2 3D」里的 3 属于技术规格
+    // 「3D」，搬过去会剩下孤零零的「D」，清洗后变成空串，最终拿「D」去搜。
+    // 判断依据必须是原文里的下一个字符——只看段内剩余文本会漏掉紧邻的
+    // 下一段（「007：无暇赴死」的数字后面就是汉字，段内却已经空了）。
+    // 各段长度在搬运中此消彼长、总和不变，记下起点下标即可一直用。
+    const segStart = [];
+    let cursor = 0;
+    for (const seg of segments) {
+      segStart.push(cursor);
+      cursor += seg.text.length;
+    }
     for (let i = 1; i < segments.length; i++) {
       const seg = segments[i];
       const prev = segments[i - 1];
-      if (seg.kind === "latin" && prev.kind === "han") {
-        const m = seg.text.match(/^[\d.\s]+/);
-        if (m) {
-          prev.text += m[0];
-          seg.text = seg.text.slice(m[0].length);
-        }
+      if (seg.kind !== "latin" || prev.kind !== "han") continue;
+      // 交替分支的顺序很关键：\d+\.? 会先匹配「7.」并在 .1 之前收工，
+      // 必须让「带小数点的数字」排在前面，才能整段搬走「7.1」。
+      const m = seg.text.match(/^(\d*\.\d+|\d+\.?)/);
+      if (!m) continue;
+      const digits = m[0];
+      const afterIndex = segStart[i] + digits.length;
+      // 数字后面紧跟字母 → 3D / 2160p 这类规格，整段留给英文名
+      if (/[A-Za-z]/.test(source[afterIndex] || "")) continue;
+      prev.text += digits;
+      seg.text = seg.text.slice(digits.length);
+      segStart[i] = afterIndex;
+    }
+
+    // 部首区（U+2E80–U+2FFF）里的字符画在汉字上下方，是汉字字形的一部分；
+    // 按字符单独分类会把它切成孤立的字素（如「杀」下面的「木」），
+    // 还原不出任何片名。这里归进汉字堆，保持与前后汉字的相对顺序。
+    for (const seg of segments) {
+      if (seg.kind === "latin" && /^[\u2e80-\u2fff]+$/.test(seg.text)) {
+        seg.kind = "han";
       }
     }
 
@@ -706,20 +764,16 @@
   }
 
   /**
-   * 构造 bt4g 搜索页地址。
-   * q 用「英文原名 + 年份」提高精度：bt4g 对空格分隔的多词是宽松匹配，
-   * 只有片名时会混进同名续作、剧集和无关内容。
-   * category=movie 过滤掉音乐/文档/软件，减少成人内容的混入。
+   * 构造各站通用的搜索词：片名 + 年份。
+   * 带年份能明显提高精度——只给片名时，同名续作、剧集和无关内容会混进来。
+   * 片名为空时绝不能只保留年份，否则会变成「2024」这种把整年资源全搜出来的
+   * 脏查询；这里直接返回空串，由调用方跳过该站。
    */
-  function buildBt4gUrl(title, year) {
-    // 片名为空时拼年份会得到「q=+2024」这类脏查询，这里统一 trim
+  function buildSearchQuery(title, year) {
     const name = String(title || "").trim();
-    const query = name ? (year ? `${name} ${year}` : name) : "";
-    const params = new URLSearchParams();
-    params.set("q", query);
-    params.set("category", "movie");
-    params.set("orderby", BT4G_ORDERBY);
-    return `${BT4G_BASE}/search?${params.toString()}`;
+    if (!name) return "";
+    const y = String(year || "").trim();
+    return y ? `${name} ${y}` : name;
   }
 
   /**
@@ -760,35 +814,52 @@
   }
 
   /**
-   * 评分区块下方的 BT4G 搜索入口。
+   * 评分区块下方的资源站搜索入口（BT4G / UIndex）。
    * 手动点击才跳转：打开条目页通常只是想看简介，没必要每次都去外部站点。
-   * 页面上只保留一个按钮，不加标题/说明文字，避免干扰评分区块。
+   * 每个站点一个按钮，不加标题/说明文字，避免干扰评分区块。
    */
-  function renderBt4gSection(container, title, year) {
+  function renderSearchSection(container, title, year) {
     // 用全局查询判断是否已插入：container 是刚刚创建的空节点，
     // 在其中查询永远查不到，起不到幂等保护作用
-    if (document.getElementById(BT4G_BUTTON_ID)) return;
-    if (!title) {
-      console.warn("[影评聚合] 未能取到片名，跳过 BT4G 入口");
+    if (document.getElementById(SEARCH_BUTTON_ID)) return;
+
+    // 所有站点共用同一个搜索词；取不到片名时整块跳过，
+    // 否则会拼出「2024」这类把整年资源全搜出来的脏查询
+    const query = buildSearchQuery(title, year);
+    if (!query) {
+      console.warn("[影评聚合] 未能取到片名，跳过资源搜索入口");
       return;
     }
 
-    // 查询词：英文原名 + 年份
-    const primaryUrl = safeUrl(buildBt4gUrl(title, year));
-    if (!primaryUrl) return;
+    // 逐个站点构造地址，非法/无法解析的站点直接跳过
+    const links = SEARCH_SITES.map((site) => {
+      let href = "";
+      try {
+        href = safeUrl(site.buildUrl(title, year));
+      } catch (error) {
+        console.error(`[影评聚合] 构造 ${site.label} 搜索地址失败:`, error);
+      }
+      return href ? { site, href } : null;
+    }).filter(Boolean);
+    if (!links.length) return;
 
     const section = document.createElement("div");
-    section.id = BT4G_BUTTON_ID;
+    section.id = SEARCH_BUTTON_ID;
     section.style.cssText =
-      "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;";
+      "padding:12px 0 4px;margin-top:12px;border-top:1px solid #eaeaea;" +
+      "display:flex;flex-wrap:wrap;align-items:center;gap:8px;";
 
     const label = year ? `${title} (${year})` : title;
-    section.innerHTML =
-      `<a href="${primaryUrl}" target="_blank" rel="noopener noreferrer" ` +
-      'style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:#2ea44f;color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ' +
-      `title="在 bt4gprx.com 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
-      "🎬 去 BT4G 搜索" +
-      "</a>";
+    section.innerHTML = links
+      .map(
+        ({ site, href }) =>
+          `<a href="${href}" target="_blank" rel="noopener noreferrer" ` +
+          `style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:${site.color};color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ` +
+          `title="在 ${escapeHtml(site.label)} 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
+          `${site.emoji} 去 ${escapeHtml(site.label)} 搜索` +
+          "</a>",
+      )
+      .join("");
 
     container.appendChild(section);
   }
@@ -905,8 +976,8 @@
       renderRottenTomatoes(ratings, data);
     }
 
-    // 评分区块下方：BT4G 资源搜索入口（手动点击，脚本不发任何请求）
-    renderBt4gSection(ratings, collectSearchTitle(), getSubjectYear());
+    // 评分区块下方：资源站搜索入口（手动点击，脚本不发任何请求）
+    renderSearchSection(ratings, collectSearchTitle(), getSubjectYear());
 
     if (hasRatings) {
       if (!isNA(data.Rated)) insertDoubanInfo("MPAA评级", data.Rated);
