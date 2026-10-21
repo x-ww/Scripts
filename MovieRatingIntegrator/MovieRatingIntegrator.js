@@ -3,7 +3,7 @@
 // @name:en      Movie Ratings
 // @name:zh-CN   影评聚合
 // @namespace    https://github.com/x-ww/MovieRatingIntegrator
-// @version      1.7.0
+// @version      1.7.1
 // @description  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
 // @description:en  Aggregate movie ratings from IMDb, Douban, Rotten Tomatoes & Metacritic on Douban/IMDb, plus a one-click BT4G torrent search link
 // @description:zh-CN  在豆瓣/IMDb聚合显示多平台评分（IMDb、豆瓣、烂番茄、Metacritic），并提供 BT4G 资源搜索入口
@@ -56,11 +56,22 @@
   // 在站点内自己选。想恢复「只搜影视 + 按做种数排序」，把下面被注释掉的
   // params.set 取消注释即可（bt4g 的参数是 category / orderby，
   // uindex 的分类参数是 c，c=1 为电影）。
+  // 按钮图标用内联 SVG 而不是 emoji：emoji 的字形由系统字体决定，
+  // 🎬 是实心彩色块、🔎 是细线放大镜，两者在同样字号下视觉重量差很多，
+  // 并排时看起来一个"大"一个"小"，且无法用 CSS 修正（盒子尺寸是一样的，
+  // 差的是字形本身的墨量）。换成同一套 24×24 线性图标、同样 14px 尺寸、
+  // 同样 stroke-width，两个按钮的图标才真正一致。
+  const ICON_SVG = {
+    download:
+      '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 21h16"/>',
+    search:
+      '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-5-5"/><path d="M10.5 7.5v6M7.5 10.5h6"/>',
+  };
   const SEARCH_SITES = [
     {
       id: "bt4g",
       label: "BT4G",
-      emoji: "🎬",
+      icon: ICON_SVG.download,
       color: "#2ea44f",
       buildUrl: (title, year) => {
         const params = new URLSearchParams();
@@ -73,7 +84,7 @@
     {
       id: "uindex",
       label: "UIndex",
-      emoji: "🔎",
+      icon: ICON_SVG.search,
       color: "#0969da",
       // 用站点搜索框自己的参数名 search（<form id="searchform" action="/search.php">），
       // 不带分类参数时搜全站。
@@ -850,13 +861,22 @@
       "display:flex;flex-wrap:wrap;align-items:center;gap:8px;";
 
     const label = year ? `${title} (${year})` : title;
+    // 图标与文字之间用 gap 控制间距，所以 SVG 后面不再拼空格，
+    // 否则 emoji 时代留下的那个空格会让两个按钮的文字起点差 1px
+    const icon = (path) =>
+      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" ' +
+      'stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+      'stroke-linejoin="round" aria-hidden="true" focusable="false" ' +
+      'style="display:block;flex-shrink:0">' +
+      path +
+      "</svg>";
     section.innerHTML = links
       .map(
         ({ site, href }) =>
           `<a href="${href}" target="_blank" rel="noopener noreferrer" ` +
           `style="display:inline-flex;align-items:center;gap:6px;padding:5px 12px;background:${site.color};color:#fff;border-radius:4px;text-decoration:none;font-size:13px;line-height:1.6" ` +
           `title="在 ${escapeHtml(site.label)} 搜索「${escapeHtml(label)}」的资源（新标签页打开）">` +
-          `${site.emoji} 去 ${escapeHtml(site.label)} 搜索` +
+          `${icon(site.icon)}去 ${escapeHtml(site.label)} 搜索` +
           "</a>",
       )
       .join("");
